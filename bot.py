@@ -7,6 +7,8 @@ from discord.ext import commands
 from flask import Flask, jsonify
 from google import genai
 from google.genai import errors
+import aiohttp
+import io
 
 # ===== Flask app =====
 app = Flask(__name__)
@@ -19,11 +21,9 @@ if not DISCORD_TOKEN:
 # Đọc danh sách API keys
 api_keys_str = os.getenv("GEMINI_API_KEYS", "")
 if api_keys_str:
-    # Tách key bằng dấu phẩy, bỏ khoảng trắng
     API_KEYS = [k.strip() for k in api_keys_str.split(",") if k.strip()]
 else:
-    # Fallback sang key cũ (hoặc key mặc định)
-    default_key = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6KXHMxGFhINizxK_9lCTnCyQx-18nL6KbF7mIUs2Jtv-g")
+    default_key = os.getenv("GEMINI_API_KEY")
     API_KEYS = [default_key]
 
 if not API_KEYS:
@@ -73,7 +73,25 @@ def split_message(text: str, limit: int = 2000) -> list:
         parts.append(current.rstrip('\n'))
     return parts
 
-# ===== Hàm gọi Gemini với cơ chế fallback key =====
+# ===== Hàm đọc nội dung file txt từ attachment =====
+async def read_txt_attachment(attachment: discord.Attachment) -> str:
+    """Tải file txt và trả về nội dung dạng string."""
+    if not attachment.filename.lower().endswith('.txt'):
+        return None
+    if attachment.size > 1_000_000:  # giới hạn 1MB
+        return None  # quá lớn, bỏ qua
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(attachment.url) as resp:
+                if resp.status == 200:
+                    content = await resp.text(encoding='utf-8', errors='ignore')
+                    return content
+    except Exception:
+        return None
+    return None
+
+# ===== Hàm gọi Gemini với fallback key =====
 def generate_with_fallback(question: str) -> str:
     last_error = None
     for idx, key in enumerate(API_KEYS):
@@ -88,16 +106,12 @@ def generate_with_fallback(question: str) -> str:
             last_error = e
             if e.code == 429:
                 print(f"⚠️ Key {idx+1} bị quota (429), chuyển sang key tiếp theo...")
-                continue  # thử key tiếp theo
+                continue
             else:
-                # Lỗi khác (400, 404, ...) => không fallback, ném lỗi
                 raise
         except Exception as e:
             last_error = e
-            # Lỗi không phải ClientError (mạng, timeout...) thì thử key khác?
-            # Nhưng để an toàn, ta coi là lỗi hệ thống và không fallback
             raise
-    # Nếu hết key mà vẫn lỗi 429
     raise Exception(f"Tất cả {len(API_KEYS)} API key đều hết quota. Lỗi cuối: {last_error}")
 
 @bot.event
@@ -116,10 +130,30 @@ async def on_message(message):
             await message.reply(f"⏳ Mày đã hỏi gần đây, đợi {COOLDOWN_SECONDS} giây đi đã.")
             return
 
-        # Lấy câu hỏi
+        # Lấy câu hỏi từ nội dung tin nhắn
         raw_question = message.clean_content.replace(f"@{bot.user.display_name}", "").strip()
-        if not raw_question:
-            await message.reply("Thế mày tag tao để hỏi cái loz gì? Nói đi!")
+
+        # Đọc file txt đính kèm
+        file_content = None
+        if message.attachments:
+            for attachment in message.attachments:
+                if attachment.filename.lower().endswith('.txt') and attachment.size <= 1_000_000:
+                    file_content = await read_txt_attachment(attachment)
+                    if file_content:
+                        break  # chỉ lấy file đầu tiên
+
+        # Ghép nội dung file vào câu hỏi nếu có
+        if file_content:
+            # Nếu có cả câu hỏi và file
+            if raw_question:
+                full_question = f"Câu hỏi: {raw_question}\n\nNội dung file txt:\n{file_content}"
+            else:
+                full_question = f"Nội dung file txt:\n{file_content}"
+        else:
+            full_question = raw_question
+
+        if not full_question:
+            await message.reply("Thế mày tag tao để hỏi cái loz gì? Nói đi, hoặc gửi file txt!")
             return
 
         # Thả react ngẫu nhiên
@@ -132,13 +166,12 @@ async def on_message(message):
         enhanced_question = (
             f"Trả lời bằng tiếng Việt, phong cách bố láo, chửi thề, nhưng vẫn cung cấp thông tin hữu ích. "
             f"Trả lời cực ngắn gọn, tối đa 2-3 câu, không dài dòng. "
-            f"Câu hỏi: {raw_question}"
+            f"Nội dung: {full_question}"
         )
 
         async with message.channel.typing():
             try:
                 reply = generate_with_fallback(enhanced_question)
-                # Chia nhỏ nếu dài
                 parts = split_message(reply, 2000)
                 for part in parts:
                     await message.reply(part)
