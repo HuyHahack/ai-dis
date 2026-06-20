@@ -11,9 +11,9 @@ from google.genai import errors
 # ===== Flask app =====
 app = Flask(__name__)
 
-# ===== Biến môi trường (ưu tiên dùng key mới) =====
+# ===== Biến môi trường =====
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # fallback key bạn cung cấp
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not DISCORD_TOKEN:
     raise ValueError("Thiếu DISCORD_TOKEN")
@@ -40,6 +40,32 @@ def is_on_cooldown(user_id: int) -> bool:
     user_cooldowns[user_id] = now
     return False
 
+# ===== Hàm chia tin nhắn dài thành nhiều phần =====
+def split_message(text: str, limit: int = 2000) -> list:
+    """Chia text thành các đoạn ≤ limit, ưu tiên cắt theo dòng hoặc dấu cách."""
+    if len(text) <= limit:
+        return [text]
+    parts = []
+    lines = text.split('\n')
+    current = ""
+    for line in lines:
+        if len(current) + len(line) + 1 <= limit:
+            current += line + '\n'
+        else:
+            if current:
+                parts.append(current.rstrip('\n'))
+            # Nếu một dòng dài hơn limit, phải cắt cứng
+            if len(line) > limit:
+                # Cắt thành từng đoạn nhỏ
+                for i in range(0, len(line), limit):
+                    parts.append(line[i:i+limit])
+                current = ""
+            else:
+                current = line + '\n'
+    if current:
+        parts.append(current.rstrip('\n'))
+    return parts
+
 @bot.event
 async def on_ready():
     print(f"✅ Bot đã đăng nhập với tên {bot.user}")
@@ -53,13 +79,13 @@ async def on_message(message):
     if bot.user in message.mentions:
         # Cooldown
         if is_on_cooldown(message.author.id):
-            await message.reply(f"⏳ Vui lòng đợi {COOLDOWN_SECONDS} giây trước khi hỏi tiếp.")
+            await message.reply(f"⏳ Mày đã hỏi gần đây, đợi {COOLDOWN_SECONDS} giây đi đã.")
             return
 
         # Lấy câu hỏi
-        question = message.clean_content.replace(f"@{bot.user.display_name}", "").strip()
-        if not question:
-            await message.reply("Hãy gửi câu hỏi cùng với tag tôi nhé!")
+        raw_question = message.clean_content.replace(f"@{bot.user.display_name}", "").strip()
+        if not raw_question:
+            await message.reply("Thế mày tag tao để hỏi cái loz gì? Nói đi!")
             return
 
         # Thả react ngẫu nhiên
@@ -68,46 +94,49 @@ async def on_message(message):
         except:
             pass
 
-        # Xử lý Gemini - thử nhiều model
+        # Thêm instruction bố láo, tiếng Việt, ngắn gọn
+        enhanced_question = (
+            f"Trả lời bằng tiếng Việt, phong cách bố láo, chửi thề, nhưng vẫn cung cấp thông tin hữu ích. "
+            f"Trả lời cực ngắn gọn, tối đa 2-3 câu, không dài dòng. "
+            f"Câu hỏi: {raw_question}"
+        )
+
         async with message.channel.typing():
             reply = None
             last_error = None
 
-            # Danh sách model theo thứ tự ưu tiên (dùng gemini-3.5-flash trước)
             models_to_try = [
-                "gemini-3.5-flash",       # model mới nhất, bạn test được
-                "gemini-1.5-flash",       # fallback
-                "gemini-2.0-flash-lite",  # fallback
-                "gemini-1.5-pro",         # fallback
+                "gemini-3.5-flash",
+                "gemini-1.5-flash",
+                "gemini-2.0-flash-lite",
+                "gemini-1.5-pro",
             ]
 
             for model_name in models_to_try:
                 try:
                     response = client.models.generate_content(
                         model=model_name,
-                        contents=question,
+                        contents=enhanced_question,
                     )
                     reply = response.text
-                    break  # thành công
+                    break
                 except errors.ClientError as e:
                     last_error = e
-                    # Nếu lỗi 404 (model not found) hoặc 429 (quota), thử tiếp
                     if e.code in (404, 429):
                         continue
                     else:
-                        # Lỗi khác (ví dụ 400) thì dừng
                         break
                 except Exception as e:
                     last_error = e
                     break
 
-            # Xử lý kết quả
             if reply:
-                if len(reply) > 2000:
-                    reply = reply[:1997] + "..."
-                await message.reply(reply)
+                # Chia nhỏ nếu dài
+                parts = split_message(reply, 2000)
+                for part in parts:
+                    await message.reply(part)
             else:
-                error_msg = str(last_error) if last_error else "Không thể tạo câu trả lời."
+                error_msg = str(last_error) if last_error else "Tao chịu, không hiểu lỗi gì."
                 if len(error_msg) > 1900:
                     error_msg = error_msg[:1900] + "..."
                 await message.reply(f"❌ Lỗi: {error_msg}")
