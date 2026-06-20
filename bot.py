@@ -11,35 +11,33 @@ from google.genai import errors
 # ===== Flask app =====
 app = Flask(__name__)
 
-# ===== Đọc biến môi trường =====
+# ===== Biến môi trường =====
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not DISCORD_TOKEN or not GEMINI_API_KEY:
     raise ValueError("Thiếu biến môi trường DISCORD_TOKEN hoặc GEMINI_API_KEY")
 
-# ===== Cấu hình Gemini với SDK mới =====
+# ===== Gemini client =====
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# ===== Cấu hình Discord bot =====
+# ===== Discord bot =====
 intents = discord.Intents.default()
 intents.message_content = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ===== Cooldown =====
 user_cooldowns = {}
 COOLDOWN_SECONDS = 30
 
-# ===== Emoji react ngẫu nhiên =====
+# ===== React emojis =====
 REACT_EMOJIS = ["👍", "❤️", "😂", "🤔", "👀", "🔥", "✨", "💯", "😎", "🤖", "🧠", "💪"]
 
 def is_on_cooldown(user_id: int) -> bool:
-    current_time = time.time()
-    if user_id in user_cooldowns:
-        if current_time - user_cooldowns[user_id] < COOLDOWN_SECONDS:
-            return True
-    user_cooldowns[user_id] = current_time
+    now = time.time()
+    if user_id in user_cooldowns and now - user_cooldowns[user_id] < COOLDOWN_SECONDS:
+        return True
+    user_cooldowns[user_id] = now
     return False
 
 @bot.event
@@ -73,9 +71,9 @@ async def on_message(message):
         # Xử lý Gemini
         async with message.channel.typing():
             try:
-                # Dùng model miễn phí, ít bị quota hơn
+                # Dùng model 1.5-flash (ít bị quota hơn)
                 response = client.models.generate_content(
-                    model="gemini-2.0-flash-lite",  # hoặc "gemini-1.5-flash"
+                    model="gemini-1.5-flash",
                     contents=question,
                 )
                 reply = response.text
@@ -84,18 +82,16 @@ async def on_message(message):
                 await message.reply(reply)
 
             except errors.ClientError as e:
-                # Xử lý riêng lỗi quota
-                if e.status_code == 429:
+                # Lỗi từ Gemini API
+                if e.code == 429:  # quota exceeded
                     await message.reply("⏳ **Quota API đã hết, vui lòng thử lại sau vài phút.**")
                 else:
-                    # Rút gọn thông báo lỗi để không vượt 2000 ký tự
                     error_msg = str(e)
                     if len(error_msg) > 1900:
                         error_msg = error_msg[:1900] + "..."
                     await message.reply(f"❌ Lỗi API: {error_msg}")
 
             except Exception as e:
-                # Lỗi khác (mạng, timeout, ...)
                 error_msg = str(e)
                 if len(error_msg) > 1900:
                     error_msg = error_msg[:1900] + "..."
@@ -107,7 +103,7 @@ async def on_message(message):
 def run_discord_bot():
     bot.run(DISCORD_TOKEN)
 
-# ===== Endpoint health =====
+# ===== Health check =====
 @app.route('/')
 @app.route('/health')
 def health_check():
