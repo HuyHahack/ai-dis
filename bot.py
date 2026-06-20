@@ -6,7 +6,7 @@ import discord
 from discord.ext import commands
 from flask import Flask, jsonify
 from google import genai
-from google.genai import types
+from google.genai import errors
 
 # ===== Flask app =====
 app = Flask(__name__)
@@ -23,98 +23,99 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ===== Cấu hình Discord bot =====
 intents = discord.Intents.default()
-intents.message_content = True   # Cần để đọc nội dung tin nhắn
+intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ===== Dictionary lưu thời gian cooldown của từng user =====
+# ===== Cooldown =====
 user_cooldowns = {}
 COOLDOWN_SECONDS = 30
 
-# ===== Danh sách emoji để react ngẫu nhiên =====
+# ===== Emoji react ngẫu nhiên =====
 REACT_EMOJIS = ["👍", "❤️", "😂", "🤔", "👀", "🔥", "✨", "💯", "😎", "🤖", "🧠", "💪"]
 
-# ===== Hàm kiểm tra cooldown =====
 def is_on_cooldown(user_id: int) -> bool:
     current_time = time.time()
     if user_id in user_cooldowns:
-        last_used = user_cooldowns[user_id]
-        if current_time - last_used < COOLDOWN_SECONDS:
+        if current_time - user_cooldowns[user_id] < COOLDOWN_SECONDS:
             return True
     user_cooldowns[user_id] = current_time
     return False
 
-# ===== Sự kiện khi bot sẵn sàng =====
 @bot.event
 async def on_ready():
-    print(f"✅ Bot đã đăng nhập với tên {bot.user} (ID: {bot.user.id})")
+    print(f"✅ Bot đã đăng nhập với tên {bot.user}")
     await bot.change_presence(activity=discord.Game(name="đợi bạn ping"))
 
-# ===== Xử lý tin nhắn khi bị tag =====
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
         return
 
-    # Kiểm tra nếu bot bị tag
     if bot.user in message.mentions:
-        # Kiểm tra cooldown
+        # Cooldown
         if is_on_cooldown(message.author.id):
-            await message.reply(f"⏳ Bạn đang bị giới hạn tốc độ! Vui lòng đợi {COOLDOWN_SECONDS} giây trước khi hỏi tiếp.")
+            await message.reply(f"⏳ Vui lòng đợi {COOLDOWN_SECONDS} giây trước khi hỏi tiếp.")
             return
 
-        # Lấy nội dung tin nhắn, bỏ phần mention
-        clean_content = message.clean_content
-        question = clean_content.replace(f"@{bot.user.display_name}", "").strip()
-
+        # Lấy câu hỏi
+        question = message.clean_content.replace(f"@{bot.user.display_name}", "").strip()
         if not question:
-            await message.reply("Bạn muốn hỏi gì? Hãy gửi câu hỏi cùng với tag tôi nhé!")
+            await message.reply("Hãy gửi câu hỏi cùng với tag tôi nhé!")
             return
 
-        # Thả react ngẫu nhiên vào tin nhắn của user
+        # Thả react ngẫu nhiên
         try:
-            random_emoji = random.choice(REACT_EMOJIS)
-            await message.add_reaction(random_emoji)
-        except Exception as e:
-            print(f"Lỗi khi thả react: {e}")
+            await message.add_reaction(random.choice(REACT_EMOJIS))
+        except:
+            pass
 
-        # Gửi phản hồi "đang suy nghĩ"
+        # Xử lý Gemini
         async with message.channel.typing():
             try:
-                # Gọi Gemini API với SDK mới
+                # Dùng model miễn phí, ít bị quota hơn
                 response = client.models.generate_content(
-                    model="gemini-3.1-pro-preview",  # Hoặc "gemini-3.1-flash-lite"
+                    model="gemini-2.0-flash-lite",  # hoặc "gemini-1.5-flash"
                     contents=question,
                 )
                 reply = response.text
                 if len(reply) > 2000:
                     reply = reply[:1997] + "..."
                 await message.reply(reply)
+
+            except errors.ClientError as e:
+                # Xử lý riêng lỗi quota
+                if e.status_code == 429:
+                    await message.reply("⏳ **Quota API đã hết, vui lòng thử lại sau vài phút.**")
+                else:
+                    # Rút gọn thông báo lỗi để không vượt 2000 ký tự
+                    error_msg = str(e)
+                    if len(error_msg) > 1900:
+                        error_msg = error_msg[:1900] + "..."
+                    await message.reply(f"❌ Lỗi API: {error_msg}")
+
             except Exception as e:
-                await message.reply(f"❌ Có lỗi xảy ra: {e}")
+                # Lỗi khác (mạng, timeout, ...)
+                error_msg = str(e)
+                if len(error_msg) > 1900:
+                    error_msg = error_msg[:1900] + "..."
+                await message.reply(f"❌ Lỗi không xác định: {error_msg}")
 
     await bot.process_commands(message)
 
-# ===== Hàm chạy bot trong thread riêng =====
+# ===== Chạy bot trong thread =====
 def run_discord_bot():
     bot.run(DISCORD_TOKEN)
 
-# ===== Endpoint health check cho Render =====
+# ===== Endpoint health =====
 @app.route('/')
 @app.route('/health')
 def health_check():
-    return jsonify({
-        "status": "alive",
-        "bot": "Discord Gemini Bot",
-        "gemini": "connected"
-    })
+    return jsonify({"status": "alive", "bot": "Discord Gemini Bot"})
 
-# ===== Khởi chạy =====
+# ===== Main =====
 if __name__ == "__main__":
-    # Chạy bot Discord trong thread riêng (non-blocking)
     bot_thread = threading.Thread(target=run_discord_bot, daemon=True)
     bot_thread.start()
-
-    # Chạy Flask web server
     port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
