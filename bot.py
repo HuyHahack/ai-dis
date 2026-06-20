@@ -13,13 +13,23 @@ app = Flask(__name__)
 
 # ===== Biến môi trường =====
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
 if not DISCORD_TOKEN:
     raise ValueError("Thiếu DISCORD_TOKEN")
 
-# ===== Gemini client =====
-client = genai.Client(api_key=GEMINI_API_KEY)
+# Đọc danh sách API keys
+api_keys_str = os.getenv("GEMINI_API_KEYS", "")
+if api_keys_str:
+    # Tách key bằng dấu phẩy, bỏ khoảng trắng
+    API_KEYS = [k.strip() for k in api_keys_str.split(",") if k.strip()]
+else:
+    # Fallback sang key cũ (hoặc key mặc định)
+    default_key = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6KXHMxGFhINizxK_9lCTnCyQx-18nL6KbF7mIUs2Jtv-g")
+    API_KEYS = [default_key]
+
+if not API_KEYS:
+    raise ValueError("Không có API key nào được cấu hình")
+
+print(f"📌 Đã tải {len(API_KEYS)} API key(s) cho Gemini.")
 
 # ===== Discord bot =====
 intents = discord.Intents.default()
@@ -40,9 +50,8 @@ def is_on_cooldown(user_id: int) -> bool:
     user_cooldowns[user_id] = now
     return False
 
-# ===== Hàm chia tin nhắn dài thành nhiều phần =====
+# ===== Hàm chia tin nhắn dài =====
 def split_message(text: str, limit: int = 2000) -> list:
-    """Chia text thành các đoạn ≤ limit, ưu tiên cắt theo dòng hoặc dấu cách."""
     if len(text) <= limit:
         return [text]
     parts = []
@@ -54,9 +63,7 @@ def split_message(text: str, limit: int = 2000) -> list:
         else:
             if current:
                 parts.append(current.rstrip('\n'))
-            # Nếu một dòng dài hơn limit, phải cắt cứng
             if len(line) > limit:
-                # Cắt thành từng đoạn nhỏ
                 for i in range(0, len(line), limit):
                     parts.append(line[i:i+limit])
                 current = ""
@@ -65,6 +72,33 @@ def split_message(text: str, limit: int = 2000) -> list:
     if current:
         parts.append(current.rstrip('\n'))
     return parts
+
+# ===== Hàm gọi Gemini với cơ chế fallback key =====
+def generate_with_fallback(question: str) -> str:
+    last_error = None
+    for idx, key in enumerate(API_KEYS):
+        try:
+            client = genai.Client(api_key=key)
+            response = client.models.generate_content(
+                model="gemini-3.5-flash",
+                contents=question,
+            )
+            return response.text
+        except errors.ClientError as e:
+            last_error = e
+            if e.code == 429:
+                print(f"⚠️ Key {idx+1} bị quota (429), chuyển sang key tiếp theo...")
+                continue  # thử key tiếp theo
+            else:
+                # Lỗi khác (400, 404, ...) => không fallback, ném lỗi
+                raise
+        except Exception as e:
+            last_error = e
+            # Lỗi không phải ClientError (mạng, timeout...) thì thử key khác?
+            # Nhưng để an toàn, ta coi là lỗi hệ thống và không fallback
+            raise
+    # Nếu hết key mà vẫn lỗi 429
+    raise Exception(f"Tất cả {len(API_KEYS)} API key đều hết quota. Lỗi cuối: {last_error}")
 
 @bot.event
 async def on_ready():
@@ -94,7 +128,7 @@ async def on_message(message):
         except:
             pass
 
-        # Thêm instruction bố láo, tiếng Việt, ngắn gọn
+        # Prompt bố láo, ngắn gọn, tiếng Việt
         enhanced_question = (
             f"Trả lời bằng tiếng Việt, phong cách bố láo, chửi thề, nhưng vẫn cung cấp thông tin hữu ích. "
             f"Trả lời cực ngắn gọn, tối đa 2-3 câu, không dài dòng. "
@@ -102,38 +136,14 @@ async def on_message(message):
         )
 
         async with message.channel.typing():
-            reply = None
-            last_error = None
-
-            models_to_try = [
-                "gemini-3.5-flash"
-            ]
-
-            for model_name in models_to_try:
-                try:
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=enhanced_question,
-                    )
-                    reply = response.text
-                    break
-                except errors.ClientError as e:
-                    last_error = e
-                    if e.code in (404, 429):
-                        continue
-                    else:
-                        break
-                except Exception as e:
-                    last_error = e
-                    break
-
-            if reply:
+            try:
+                reply = generate_with_fallback(enhanced_question)
                 # Chia nhỏ nếu dài
                 parts = split_message(reply, 2000)
                 for part in parts:
                     await message.reply(part)
-            else:
-                error_msg = str(last_error) if last_error else "Tao chịu, không hiểu lỗi gì."
+            except Exception as e:
+                error_msg = str(e)
                 if len(error_msg) > 1900:
                     error_msg = error_msg[:1900] + "..."
                 await message.reply(f"❌ Lỗi: {error_msg}")
