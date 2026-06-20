@@ -11,12 +11,12 @@ from google.genai import errors
 # ===== Flask app =====
 app = Flask(__name__)
 
-# ===== Biến môi trường =====
+# ===== Biến môi trường (ưu tiên dùng key mới) =====
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # fallback key bạn cung cấp
 
-if not DISCORD_TOKEN or not GEMINI_API_KEY:
-    raise ValueError("Thiếu biến môi trường DISCORD_TOKEN hoặc GEMINI_API_KEY")
+if not DISCORD_TOKEN:
+    raise ValueError("Thiếu DISCORD_TOKEN")
 
 # ===== Gemini client =====
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -68,34 +68,49 @@ async def on_message(message):
         except:
             pass
 
-        # Xử lý Gemini
+        # Xử lý Gemini - thử nhiều model
         async with message.channel.typing():
-            try:
-                # Dùng model 1.5-flash (ít bị quota hơn)
-                response = client.models.generate_content(
-                    model="gemini-1.5-flash",
-                    contents=question,
-                )
-                reply = response.text
+            reply = None
+            last_error = None
+
+            # Danh sách model theo thứ tự ưu tiên (dùng gemini-3.5-flash trước)
+            models_to_try = [
+                "gemini-3.5-flash",       # model mới nhất, bạn test được
+                "gemini-1.5-flash",       # fallback
+                "gemini-2.0-flash-lite",  # fallback
+                "gemini-1.5-pro",         # fallback
+            ]
+
+            for model_name in models_to_try:
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=question,
+                    )
+                    reply = response.text
+                    break  # thành công
+                except errors.ClientError as e:
+                    last_error = e
+                    # Nếu lỗi 404 (model not found) hoặc 429 (quota), thử tiếp
+                    if e.code in (404, 429):
+                        continue
+                    else:
+                        # Lỗi khác (ví dụ 400) thì dừng
+                        break
+                except Exception as e:
+                    last_error = e
+                    break
+
+            # Xử lý kết quả
+            if reply:
                 if len(reply) > 2000:
                     reply = reply[:1997] + "..."
                 await message.reply(reply)
-
-            except errors.ClientError as e:
-                # Lỗi từ Gemini API
-                if e.code == 429:  # quota exceeded
-                    await message.reply("⏳ **Quota API đã hết, vui lòng thử lại sau vài phút.**")
-                else:
-                    error_msg = str(e)
-                    if len(error_msg) > 1900:
-                        error_msg = error_msg[:1900] + "..."
-                    await message.reply(f"❌ Lỗi API: {error_msg}")
-
-            except Exception as e:
-                error_msg = str(e)
+            else:
+                error_msg = str(last_error) if last_error else "Không thể tạo câu trả lời."
                 if len(error_msg) > 1900:
                     error_msg = error_msg[:1900] + "..."
-                await message.reply(f"❌ Lỗi không xác định: {error_msg}")
+                await message.reply(f"❌ Lỗi: {error_msg}")
 
     await bot.process_commands(message)
 
