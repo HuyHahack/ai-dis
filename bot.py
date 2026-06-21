@@ -9,6 +9,7 @@ from google import genai
 from google.genai import errors
 import aiohttp
 import base64
+import re
 
 # ===== Flask app =====
 app = Flask(__name__)
@@ -18,12 +19,16 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 if not DISCORD_TOKEN:
     raise ValueError("Thiếu DISCORD_TOKEN")
 
+GUILD_ID = os.getenv("GUILD_ID")
+if not GUILD_ID:
+    print("⚠️ Không có GUILD_ID, sẽ đăng ký global (mất 1-2h)")
+
 # Đọc danh sách API keys
 api_keys_str = os.getenv("GEMINI_API_KEYS", "")
 if api_keys_str:
     API_KEYS = [k.strip() for k in api_keys_str.split(",") if k.strip()]
 else:
-    default_key = os.getenv("GEMINI_API_KEY")
+    default_key = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6KXHMxGFhINizxK_9lCTnCyQx-18nL6KbF7mIUs2Jtv-g")
     API_KEYS = [default_key]
 
 if not API_KEYS:
@@ -36,22 +41,105 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ===== Lưu phong cách của từng user =====
-user_styles = {}  # user_id -> "angry" hoặc "tsundere"
+# ===== Dictionary slang / tiếng lóng =====
+SLANG_DICT = {
+    "lọ": "sục",
+    "sục": "lọ",
+    "cmm": "con mẹ mày",
+    "vcl": "vãi cả lồn",
+    "vcc": "vãi cả cặc",
+    "đmm": "địt mẹ mày",
+    "dm": "địt mẹ",
+    "dmm": "địt mẹ mày",
+    "cc": "cặc",
+    "cl": "cặc",
+    "clgt": "cặc gì thế",
+    "cmn": "con mẹ nó",
+    "cmnr": "con mẹ nó rồi",
+    "đm": "địt mẹ",
+    "vl": "vãi lồn",
+    "vc": "vãi cả",
+    "hết pin": "chết",
+    "cày": "chơi game",
+    "phọt": "nói",
+    "gato": "ghen tị",
+    "xàm": "vô nghĩa",
+    "xàm loz": "vô nghĩa",
+    "cringe": "xấu hổ, ngại",
+    "flex": "khoe khoang",
+    "fomo": "sợ bỏ lỡ",
+    "ghệ": "người yêu",
+    "gấu": "người yêu",
+    "ny": "người yêu",
+    "crush": "người thích thầm",
+    "thanh xuân": "tuổi trẻ",
+    "thả thính": "tán tỉnh",
+    "tấu hài": "làm trò hài",
+    "trend": "xu hướng",
+    "vibe": "cảm xúc, không khí",
+    "btw": "nhân tiện",
+    "lol": "cười lớn",
+    "omg": "trời ơi",
+    "wtf": "cái quái gì",
+    "idk": "tôi không biết",
+    "ikr": "tôi biết mà",
+    "tbh": "thật lòng mà nói",
+    "feed": "nuôi địch",
+    "carry": "gánh team",
+    "gank": "tập kích",
+    "farming": "cày vàng",
+    "afk": "rời bàn phím",
+    "lag": "giật, chậm",
+    "buff": "tăng sức mạnh",
+    "nerf": "giảm sức mạnh",
+    "op": "quá mạnh",
+    "noob": "người mới, gà",
+    "pro": "chuyên nghiệp",
+    "gg": "good game",
+    "ez": "dễ dàng",
+    "chill": "thư giãn",
+    "cool": "tuyệt",
+    "fake": "giả",
+    "emo": "buồn, cảm xúc",
+    "stfu": "câm mồm",
+    "lmao": "cười chết mất",
+    "rofl": "lăn lộn cười",
+}
+
+# ===== Hàm dịch slang =====
+def translate_slang(text: str) -> str:
+    words = re.findall(r'\b\w+\b|[^\w\s]', text, re.UNICODE)
+    result = []
+    for word in words:
+        if re.match(r'^\w+$', word, re.UNICODE):
+            word_lower = word.lower()
+            if word_lower in SLANG_DICT:
+                result.append(SLANG_DICT[word_lower])
+            else:
+                result.append(word)
+        else:
+            result.append(word)
+    return ''.join(result)
+
+# ===== Lưu phong cách user =====
+user_styles = {}
 DEFAULT_STYLE = "angry"
 
-# ===== Định nghĩa style prompts =====
+# ===== Định nghĩa style prompts (tsundere chỉ dùng cậu/tớ) =====
 STYLE_PROMPTS = {
     "angry": (
-        "Trả lời bằng tiếng Việt, phong cách bố láo, chửi thề, nhưng vẫn cung cấp thông tin hữu ích. "
+        "Trả lời bằng tiếng Việt (có thể dùng tiếng lóng, viết tắt như: lọ=sục, đmm, vcl, cc, cmnr), "
+        "phong cách bố láo, chửi thề, nhưng vẫn cung cấp thông tin hữu ích. "
         "Trả lời cực ngắn gọn, tối đa 2-3 câu, không dài dòng."
     ),
     "tsundere": (
-        "Trả lời bằng tiếng Việt, phong cách tsundere (ngại ngùng, khó chịu nhưng thực ra quan tâm). "
+        "Trả lời bằng tiếng Việt (có thể dùng tiếng lóng, viết tắt), "
+        "phong cách tsundere (ngại ngùng, khó chịu nhưng thực ra quan tâm). "
+        "Chỉ dùng xưng hô 'cậu' và 'tớ' (KHÔNG dùng 'anh/chị' hoặc 'em'). "
         "Dùng các từ như: 'H-Hở?!', 'C-cậu nói dì dạ?!', 'T-tớ dỗi đó!', 'Hmmp~', 'Đ-đồ ngốc!', "
-        "'Tớ không quan tâm đâu nhé!', 'Nhưng mà... cảm ơn...', 'Hứ!', 'Cậu ngốc quá!'. "
+        "'Tớ không quan tâm đâu nhé!', 'Nhưng mà... cảm ơn...', 'Hứ!', 'C-cậu ngốc quá!'. "
         "Thỉnh thoảng lắp bắp, đỏ mặt (trong lời nói). "
-        "Trả lời cực ngắn gọn, tối đa 2-3 câu, vẫn cung cấp thông tin hữu ích nhưng với phong cách tsundere."
+        "Trả lời cực ngắn gọn, tối đa 2-3 câu, vẫn cung cấp thông tin hữu ích."
     )
 }
 
@@ -108,7 +196,7 @@ async def read_txt_attachment(attachment: discord.Attachment) -> str:
         return None
     return None
 
-# ===== Hàm đọc ảnh và chuyển thành base64 =====
+# ===== Hàm đọc ảnh =====
 async def read_image_attachment(attachment: discord.Attachment) -> dict:
     image_extensions = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp']
     if not any(attachment.filename.lower().endswith(ext) for ext in image_extensions):
@@ -132,7 +220,7 @@ async def read_image_attachment(attachment: discord.Attachment) -> dict:
         return None
     return None
 
-# ===== Hàm lấy nội dung tin nhắn được reply =====
+# ===== Hàm lấy tin nhắn reply =====
 async def get_replied_message_content(message: discord.Message) -> str:
     if message.reference and message.reference.message_id:
         try:
@@ -159,7 +247,7 @@ async def get_replied_message_content(message: discord.Message) -> str:
             return None
     return None
 
-# ===== Hàm gọi Gemini với ảnh và reply =====
+# ===== Hàm gọi Gemini =====
 def generate_with_fallback(question: str, image_data: dict = None, replied_content: str = None) -> str:
     last_error = None
     
@@ -191,7 +279,7 @@ def generate_with_fallback(question: str, image_data: dict = None, replied_conte
                     model="gemma-4-31b-it",
                     contents={"parts": contents_parts},
                     config={
-                        "temperature": 0.7,
+                        "temperature": 0.9,
                         "max_output_tokens": 1000,
                     }
                 )
@@ -222,7 +310,11 @@ def generate_with_fallback(question: str, image_data: dict = None, replied_conte
     raise Exception(f"Tất cả API key đều hết quota. Lỗi cuối: {last_error}")
 
 # ===== Slash command: /phongcach =====
-@bot.tree.command(name="phongcach", description="Đổi phong cách trả lời của bot")
+@bot.tree.command(
+    name="phongcach",
+    description="Đổi phong cách trả lời của bot: tsundere (dễ thương) hoặc angry (bố láo)",
+    guild=discord.Object(id=int(GUILD_ID)) if GUILD_ID else None
+)
 async def phongcach(interaction: discord.Interaction, style: str):
     """Đổi phong cách: tsundere hoặc angry"""
     style = style.lower()
@@ -235,7 +327,7 @@ async def phongcach(interaction: discord.Interaction, style: str):
     
     user_styles[interaction.user.id] = style
     style_names = {
-        "tsundere": "Tsundere (ngại ngùng, dễ thương)",
+        "tsundere": "Tsundere (ngại ngùng, dễ thương, xưng cậu/tớ)",
         "angry": "Angry (bố láo, chửi thề)"
     }
     await interaction.response.send_message(
@@ -248,9 +340,17 @@ async def phongcach(interaction: discord.Interaction, style: str):
 async def on_ready():
     print(f"✅ Bot đã đăng nhập với tên {bot.user}")
     await bot.change_presence(activity=discord.Game(name="đợi bạn ping"))
+    
+    print(f"📖 Đã tải {len(SLANG_DICT)} từ slang/viết tắt")
+    
     try:
-        synced = await bot.tree.sync()
-        print(f"✅ Đã sync {len(synced)} slash command(s)")
+        if GUILD_ID:
+            guild = discord.Object(id=int(GUILD_ID))
+            synced = await bot.tree.sync(guild=guild)
+            print(f"✅ Đã sync {len(synced)} slash command(s) cho guild {GUILD_ID}")
+        else:
+            synced = await bot.tree.sync()
+            print(f"✅ Đã sync {len(synced)} slash command(s) global")
     except Exception as e:
         print(f"❌ Lỗi sync slash commands: {e}")
 
@@ -265,15 +365,18 @@ async def on_message(message):
             await message.reply(f"⏳ Mày đã hỏi gần đây, đợi {COOLDOWN_SECONDS} giây đi đã.")
             return
 
-        # Lấy style của user (mặc định angry)
+        # Lấy style của user
         user_style = user_styles.get(message.author.id, DEFAULT_STYLE)
         style_prompt = STYLE_PROMPTS.get(user_style, STYLE_PROMPTS[DEFAULT_STYLE])
 
-        # Lấy câu hỏi
+        # Lấy câu hỏi và dịch slang
         raw_question = message.clean_content.replace(f"@{bot.user.display_name}", "").strip()
+        translated_question = translate_slang(raw_question)
 
         # Lấy nội dung tin nhắn được reply
         replied_content = await get_replied_message_content(message)
+        if replied_content:
+            replied_content = translate_slang(replied_content)
 
         # Đọc file txt và ảnh
         file_content = None
@@ -284,25 +387,26 @@ async def on_message(message):
                 if attachment.filename.lower().endswith('.txt') and attachment.size <= 1_000_000:
                     file_content = await read_txt_attachment(attachment)
                     if file_content:
+                        file_content = translate_slang(file_content)
                         break
                 
                 if not image_data:
                     image_data = await read_image_attachment(attachment)
 
-        # Ghép nội dung file txt
+        # Ghép nội dung
         if file_content:
-            if raw_question:
-                full_question = f"Câu hỏi: {raw_question}\n\nNội dung file txt:\n{file_content}"
+            if translated_question:
+                full_question = f"Câu hỏi: {translated_question}\n\nNội dung file txt:\n{file_content}"
             else:
                 full_question = f"Nội dung file txt:\n{file_content}"
         else:
-            full_question = raw_question
+            full_question = translated_question
 
         if not full_question and not replied_content and not image_data:
             await message.reply("Thế mày tag tao để hỏi cái loz gì? Nói đi, hoặc gửi file/ảnh, hoặc reply tin nhắn khác!")
             return
 
-        # Tạo prompt với style đã chọn
+        # Tạo prompt với style
         if full_question:
             enhanced_question = f"{style_prompt} Nội dung: {full_question}"
         else:
