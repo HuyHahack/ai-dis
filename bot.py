@@ -125,7 +125,7 @@ def translate_slang(text: str) -> str:
 user_styles = {}
 DEFAULT_STYLE = "angry"
 
-# ===== Định nghĩa style prompts (tsundere chỉ dùng cậu/tớ) =====
+# ===== Định nghĩa style prompts =====
 STYLE_PROMPTS = {
     "angry": (
         "Trả lời bằng tiếng Việt (có thể dùng tiếng lóng, viết tắt như: lọ=sục, đmm, vcl, cc, cmnr), "
@@ -313,7 +313,6 @@ def generate_with_fallback(question: str, image_data: dict = None, replied_conte
 @bot.tree.command(
     name="phongcach",
     description="Đổi phong cách trả lời của bot: tsundere (dễ thương) hoặc angry (bố láo)",
-    guild=discord.Object(id=int(GUILD_ID)) if GUILD_ID else None
 )
 async def phongcach(interaction: discord.Interaction, style: str):
     """Đổi phong cách: tsundere hoặc angry"""
@@ -335,7 +334,7 @@ async def phongcach(interaction: discord.Interaction, style: str):
         ephemeral=True
     )
 
-# ===== Sync slash commands =====
+# ===== Sync slash commands (CÓ FALLBACK) =====
 @bot.event
 async def on_ready():
     print(f"✅ Bot đã đăng nhập với tên {bot.user}")
@@ -343,16 +342,45 @@ async def on_ready():
     
     print(f"📖 Đã tải {len(SLANG_DICT)} từ slang/viết tắt")
     
+    # Sync slash commands
     try:
         if GUILD_ID:
+            # Sync cho 1 guild cụ thể
             guild = discord.Object(id=int(GUILD_ID))
+            bot.tree.copy_global_to(guild=guild)
             synced = await bot.tree.sync(guild=guild)
             print(f"✅ Đã sync {len(synced)} slash command(s) cho guild {GUILD_ID}")
         else:
+            # Sync global (mất 1-2 giờ)
             synced = await bot.tree.sync()
             print(f"✅ Đã sync {len(synced)} slash command(s) global")
     except Exception as e:
-        print(f"❌ Lỗi sync slash commands: {e}")
+        print(f"❌ Lỗi sync lần 1: {e}")
+        print("🔄 Thử sync lại sau 5 giây...")
+        await asyncio.sleep(5)
+        try:
+            if GUILD_ID:
+                guild = discord.Object(id=int(GUILD_ID))
+                synced = await bot.tree.sync(guild=guild)
+                print(f"✅ Đã sync lại {len(synced)} command(s) cho guild {GUILD_ID}")
+            else:
+                synced = await bot.tree.sync()
+                print(f"✅ Đã sync lại {len(synced)} command(s) global")
+        except Exception as e2:
+            print(f"❌ Lỗi sync lần 2: {e2}")
+            print("💡 Hãy kiểm tra GUILD_ID hoặc token bot")
+
+# ===== Event lắng nghe lỗi slash command =====
+@bot.event
+async def on_app_command_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
+    if isinstance(error, discord.app_commands.errors.CommandNotFound):
+        await interaction.response.send_message(
+            "⚠️ Lệnh chưa được đồng bộ. Vui lòng đợi 1-2 phút hoặc gõ lại.",
+            ephemeral=True
+        )
+        print(f"⚠️ Command not found: {interaction.command.name if interaction.command else 'unknown'}")
+    else:
+        print(f"❌ Lỗi slash command: {error}")
 
 @bot.event
 async def on_message(message):
@@ -449,6 +477,7 @@ def health_check():
 
 # ===== Main =====
 if __name__ == "__main__":
+    import asyncio
     bot_thread = threading.Thread(target=run_discord_bot, daemon=True)
     bot_thread.start()
     port = int(os.getenv("PORT", 10000))
