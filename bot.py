@@ -8,7 +8,7 @@ from flask import Flask, jsonify
 from google import genai
 from google.genai import errors
 import aiohttp
-import io
+import base64
 
 # ===== Flask app =====
 app = Flask(__name__)
@@ -73,14 +73,12 @@ def split_message(text: str, limit: int = 2000) -> list:
         parts.append(current.rstrip('\n'))
     return parts
 
-# ===== Hàm đọc nội dung file txt từ attachment =====
+# ===== Hàm đọc nội dung file txt =====
 async def read_txt_attachment(attachment: discord.Attachment) -> str:
-    """Tải file txt và trả về nội dung dạng string."""
     if not attachment.filename.lower().endswith('.txt'):
         return None
-    if attachment.size > 1_000_000:  # giới hạn 1MB
-        return None  # quá lớn, bỏ qua
-    
+    if attachment.size > 1_000_000:
+        return None
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(attachment.url) as resp:
@@ -91,28 +89,128 @@ async def read_txt_attachment(attachment: discord.Attachment) -> str:
         return None
     return None
 
-# ===== Hàm gọi Gemini với fallback key =====
-def generate_with_fallback(question: str) -> str:
+# ===== Hàm đọc ảnh và chuyển thành base64 =====
+async def read_image_attachment(attachment: discord.Attachment) -> dict:
+    image_extensions = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp']
+    if not any(attachment.filename.lower().endswith(ext) for ext in image_extensions):
+        return None
+    if attachment.size > 5_000_000:
+        return None
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(attachment.url) as resp:
+                if resp.status == 200:
+                    image_data = await resp.read()
+                    mime_type = attachment.content_type or 'image/jpeg'
+                    base64_data = base64.b64encode(image_data).decode('utf-8')
+                    return {
+                        "mime_type": mime_type,
+                        "data": base64_data
+                    }
+    except Exception as e:
+        print(f"Lỗi đọc ảnh: {e}")
+        return None
+    return None
+
+# ===== Hàm lấy nội dung tin nhắn được reply =====
+async def get_replied_message_content(message: discord.Message) -> str:
+    if message.reference and message.reference.message_id:
+        try:
+            replied_msg = await message.channel.fetch_message(message.reference.message_id)
+            content = replied_msg.clean_content
+            
+            # Nếu có ảnh trong tin nhắn reply
+            if replied_msg.attachments:
+                image_names = [att.filename for att in replied_msg.attachments 
+                              if att.filename.lower().endswith(('.png','.jpg','.jpeg','.gif','.webp'))]
+                if image_names:
+                    content += f"\n[Ảnh đính kèm: {', '.join(image_names)}]"
+                
+                txt_names = [att.filename for att in replied_msg.attachments 
+                            if att.filename.lower().endswith('.txt')]
+                if txt_names:
+                    content += f"\n[File txt: {', '.join(txt_names)}]"
+            
+            # Nếu tin nhắn reply là của bot, lấy luôn nội dung đó
+            if replied_msg.author == bot.user:
+                content = f"Tin nhắn trước của bot: {content}\nHãy trả lời dựa trên nội dung này"
+            
+            return content
+        except Exception as e:
+            print(f"Lỗi lấy tin nhắn reply: {e}")
+            return None
+    return None
+
+# ===== Hàm gọi Gemini với ảnh và reply =====
+def generate_with_fallback(question: str, image_data: dict = None, replied_content: str = None) -> str:
     last_error = None
+    
+    # Tạo nội dung gửi lên Gemini
+    contents_parts = []
+    
+    # Thêm câu hỏi chính (đã có prompt bố láo bên ngoài)
+    if question:
+        contents_parts.append({"text": question})
+    
+    # Thêm nội dung reply (nếu có)
+    if replied_content:
+        contents_parts.append({"text": f"\n[Tin nhắn được reply]: {replied_content}"})
+    
+    # Thêm ảnh (nếu có)
+    if image_data:
+        contents_parts.append({
+            "inline_data": {
+                "mime_type": image_data["mime_type"],
+                "data": image_data["data"]
+            }
+        })
+    
+    # Nếu không có câu hỏi nhưng có reply, dùng reply làm câu hỏi
+    if not question and replied_content and not image_data:
+        contents_parts = [{"text": f"Trả lời tin nhắn này (phong cách bố láo, chửi thề, tiếng Việt, ngắn gọn): {replied_content}"}]
+    
+    # Thử từng key
     for idx, key in enumerate(API_KEYS):
         try:
             client = genai.Client(api_key=key)
-            response = client.models.generate_content(
-                model="gemini-3.5-flash",
-                contents=question,
-            )
-            return response.text
+            
+            # Thử gemma-4-31b-it trước
+            try:
+                response = client.models.generate_content(
+                    model="gemma-4-31b-it",
+                    contents={"parts": contents_parts},
+                    config={
+                        "temperature": 0.7,
+                        "max_output_tokens": 1000,
+                    }
+                )
+                return response.text
+            except errors.ClientError as e:
+                if e.code == 404:
+                    print(f"⚠️ Model gemma-4-31b-it không tồn tại, thử gemini-2.0-flash...")
+                    # Fallback sang gemini-2.0-flash
+                    response = client.models.generate_content(
+                        model="gemini-2.0-flash",
+                        contents={"parts": contents_parts},
+                    )
+                    return response.text
+                elif e.code == 429:
+                    print(f"⚠️ Key {idx+1} bị quota (429), chuyển key...")
+                    continue
+                else:
+                    raise
         except errors.ClientError as e:
             last_error = e
             if e.code == 429:
-                print(f"⚠️ Key {idx+1} bị quota (429), chuyển sang key tiếp theo...")
                 continue
             else:
                 raise
         except Exception as e:
             last_error = e
             raise
-    raise Exception(f"Tất cả {len(API_KEYS)} API key đều hết quota. Lỗi cuối: {last_error}")
+    
+    raise Exception(f"Tất cả API key đều hết quota. Lỗi cuối: {last_error}")
 
 @bot.event
 async def on_ready():
@@ -133,18 +231,26 @@ async def on_message(message):
         # Lấy câu hỏi từ nội dung tin nhắn
         raw_question = message.clean_content.replace(f"@{bot.user.display_name}", "").strip()
 
-        # Đọc file txt đính kèm
+        # Lấy nội dung tin nhắn được reply
+        replied_content = await get_replied_message_content(message)
+
+        # Đọc file txt và ảnh đính kèm
         file_content = None
+        image_data = None
+        
         if message.attachments:
             for attachment in message.attachments:
                 if attachment.filename.lower().endswith('.txt') and attachment.size <= 1_000_000:
                     file_content = await read_txt_attachment(attachment)
                     if file_content:
-                        break  # chỉ lấy file đầu tiên
+                        break
+                
+                # Đọc ảnh
+                if not image_data:
+                    image_data = await read_image_attachment(attachment)
 
-        # Ghép nội dung file vào câu hỏi nếu có
+        # Ghép nội dung file txt vào câu hỏi
         if file_content:
-            # Nếu có cả câu hỏi và file
             if raw_question:
                 full_question = f"Câu hỏi: {raw_question}\n\nNội dung file txt:\n{file_content}"
             else:
@@ -152,9 +258,19 @@ async def on_message(message):
         else:
             full_question = raw_question
 
-        if not full_question:
-            await message.reply("Thế mày tag tao để hỏi cái loz gì? Nói đi, hoặc gửi file txt!")
+        # Nếu không có câu hỏi, không có file, không có reply, không có ảnh
+        if not full_question and not replied_content and not image_data:
+            await message.reply("Thế mày tag tao để hỏi cái loz gì? Nói đi, hoặc gửi file/ảnh, hoặc reply tin nhắn khác!")
             return
+
+        # Tạo prompt bố láo
+        enhanced_question = None
+        if full_question:
+            enhanced_question = (
+                f"Trả lời bằng tiếng Việt, phong cách bố láo, chửi thề, nhưng vẫn cung cấp thông tin hữu ích. "
+                f"Trả lời cực ngắn gọn, tối đa 2-3 câu, không dài dòng. "
+                f"Nội dung: {full_question}"
+            )
 
         # Thả react ngẫu nhiên
         try:
@@ -162,16 +278,14 @@ async def on_message(message):
         except:
             pass
 
-        # Prompt bố láo, ngắn gọn, tiếng Việt
-        enhanced_question = (
-            f"Trả lời bằng tiếng Việt, phong cách bố láo, chửi thề, nhưng vẫn cung cấp thông tin hữu ích. "
-            f"Trả lời cực ngắn gọn, tối đa 2-3 câu, không dài dòng. "
-            f"Nội dung: {full_question}"
-        )
-
+        # Gọi Gemini
         async with message.channel.typing():
             try:
-                reply = generate_with_fallback(enhanced_question)
+                reply = generate_with_fallback(
+                    question=enhanced_question,
+                    image_data=image_data,
+                    replied_content=replied_content
+                )
                 parts = split_message(reply, 2000)
                 for part in parts:
                     await message.reply(part)
