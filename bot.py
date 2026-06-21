@@ -36,6 +36,25 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# ===== Lưu phong cách của từng user =====
+user_styles = {}  # user_id -> "angry" hoặc "tsundere"
+DEFAULT_STYLE = "angry"
+
+# ===== Định nghĩa style prompts =====
+STYLE_PROMPTS = {
+    "angry": (
+        "Trả lời bằng tiếng Việt, phong cách bố láo, chửi thề, nhưng vẫn cung cấp thông tin hữu ích. "
+        "Trả lời cực ngắn gọn, tối đa 2-3 câu, không dài dòng."
+    ),
+    "tsundere": (
+        "Trả lời bằng tiếng Việt, phong cách tsundere (ngại ngùng, khó chịu nhưng thực ra quan tâm). "
+        "Dùng các từ như: 'H-Hở?!', 'C-cậu nói dì dạ?!', 'T-tớ dỗi đó!', 'Hmmp~', 'Đ-đồ ngốc!', "
+        "'Tớ không quan tâm đâu nhé!', 'Nhưng mà... cảm ơn...', 'Hứ!', 'A-anh/chị ngốc quá!'. "
+        "Thỉnh thoảng lắp bắp, đỏ mặt (trong lời nói). "
+        "Trả lời cực ngắn gọn, tối đa 2-3 câu, vẫn cung cấp thông tin hữu ích nhưng với phong cách tsundere."
+    )
+}
+
 # ===== Cooldown =====
 user_cooldowns = {}
 COOLDOWN_SECONDS = 30
@@ -120,7 +139,6 @@ async def get_replied_message_content(message: discord.Message) -> str:
             replied_msg = await message.channel.fetch_message(message.reference.message_id)
             content = replied_msg.clean_content
             
-            # Nếu có ảnh trong tin nhắn reply
             if replied_msg.attachments:
                 image_names = [att.filename for att in replied_msg.attachments 
                               if att.filename.lower().endswith(('.png','.jpg','.jpeg','.gif','.webp'))]
@@ -132,7 +150,6 @@ async def get_replied_message_content(message: discord.Message) -> str:
                 if txt_names:
                     content += f"\n[File txt: {', '.join(txt_names)}]"
             
-            # Nếu tin nhắn reply là của bot, lấy luôn nội dung đó
             if replied_msg.author == bot.user:
                 content = f"Tin nhắn trước của bot: {content}\nHãy trả lời dựa trên nội dung này"
             
@@ -146,18 +163,14 @@ async def get_replied_message_content(message: discord.Message) -> str:
 def generate_with_fallback(question: str, image_data: dict = None, replied_content: str = None) -> str:
     last_error = None
     
-    # Tạo nội dung gửi lên Gemini
     contents_parts = []
     
-    # Thêm câu hỏi chính (đã có prompt bố láo bên ngoài)
     if question:
         contents_parts.append({"text": question})
     
-    # Thêm nội dung reply (nếu có)
     if replied_content:
         contents_parts.append({"text": f"\n[Tin nhắn được reply]: {replied_content}"})
     
-    # Thêm ảnh (nếu có)
     if image_data:
         contents_parts.append({
             "inline_data": {
@@ -166,16 +179,13 @@ def generate_with_fallback(question: str, image_data: dict = None, replied_conte
             }
         })
     
-    # Nếu không có câu hỏi nhưng có reply, dùng reply làm câu hỏi
     if not question and replied_content and not image_data:
-        contents_parts = [{"text": f"Trả lời tin nhắn này (phong cách bố láo, chửi thề, tiếng Việt, ngắn gọn): {replied_content}"}]
+        contents_parts = [{"text": f"Trả lời tin nhắn này: {replied_content}"}]
     
-    # Thử từng key
     for idx, key in enumerate(API_KEYS):
         try:
             client = genai.Client(api_key=key)
             
-            # Thử gemma-4-31b-it trước
             try:
                 response = client.models.generate_content(
                     model="gemma-4-31b-it",
@@ -189,7 +199,6 @@ def generate_with_fallback(question: str, image_data: dict = None, replied_conte
             except errors.ClientError as e:
                 if e.code == 404:
                     print(f"⚠️ Model gemma-4-31b-it không tồn tại, thử gemini-2.0-flash...")
-                    # Fallback sang gemini-2.0-flash
                     response = client.models.generate_content(
                         model="gemini-2.0-flash",
                         contents={"parts": contents_parts},
@@ -212,10 +221,38 @@ def generate_with_fallback(question: str, image_data: dict = None, replied_conte
     
     raise Exception(f"Tất cả API key đều hết quota. Lỗi cuối: {last_error}")
 
+# ===== Slash command: /phongcach =====
+@bot.tree.command(name="phongcach", description="Đổi phong cách trả lời của bot")
+async def phongcach(interaction: discord.Interaction, style: str):
+    """Đổi phong cách: tsundere hoặc angry"""
+    style = style.lower()
+    if style not in ["tsundere", "angry"]:
+        await interaction.response.send_message(
+            "❌ Phong cách không hợp lệ! Chọn `tsundere` hoặc `angry`.",
+            ephemeral=True
+        )
+        return
+    
+    user_styles[interaction.user.id] = style
+    style_names = {
+        "tsundere": "Tsundere (ngại ngùng, dễ thương)",
+        "angry": "Angry (bố láo, chửi thề)"
+    }
+    await interaction.response.send_message(
+        f"✅ Đã đổi phong cách sang **{style_names[style]}**!",
+        ephemeral=True
+    )
+
+# ===== Sync slash commands =====
 @bot.event
 async def on_ready():
     print(f"✅ Bot đã đăng nhập với tên {bot.user}")
     await bot.change_presence(activity=discord.Game(name="đợi bạn ping"))
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ Đã sync {len(synced)} slash command(s)")
+    except Exception as e:
+        print(f"❌ Lỗi sync slash commands: {e}")
 
 @bot.event
 async def on_message(message):
@@ -228,13 +265,17 @@ async def on_message(message):
             await message.reply(f"⏳ Mày đã hỏi gần đây, đợi {COOLDOWN_SECONDS} giây đi đã.")
             return
 
-        # Lấy câu hỏi từ nội dung tin nhắn
+        # Lấy style của user (mặc định angry)
+        user_style = user_styles.get(message.author.id, DEFAULT_STYLE)
+        style_prompt = STYLE_PROMPTS.get(user_style, STYLE_PROMPTS[DEFAULT_STYLE])
+
+        # Lấy câu hỏi
         raw_question = message.clean_content.replace(f"@{bot.user.display_name}", "").strip()
 
         # Lấy nội dung tin nhắn được reply
         replied_content = await get_replied_message_content(message)
 
-        # Đọc file txt và ảnh đính kèm
+        # Đọc file txt và ảnh
         file_content = None
         image_data = None
         
@@ -245,11 +286,10 @@ async def on_message(message):
                     if file_content:
                         break
                 
-                # Đọc ảnh
                 if not image_data:
                     image_data = await read_image_attachment(attachment)
 
-        # Ghép nội dung file txt vào câu hỏi
+        # Ghép nội dung file txt
         if file_content:
             if raw_question:
                 full_question = f"Câu hỏi: {raw_question}\n\nNội dung file txt:\n{file_content}"
@@ -258,21 +298,17 @@ async def on_message(message):
         else:
             full_question = raw_question
 
-        # Nếu không có câu hỏi, không có file, không có reply, không có ảnh
         if not full_question and not replied_content and not image_data:
             await message.reply("Thế mày tag tao để hỏi cái loz gì? Nói đi, hoặc gửi file/ảnh, hoặc reply tin nhắn khác!")
             return
 
-        # Tạo prompt bố láo
-        enhanced_question = None
+        # Tạo prompt với style đã chọn
         if full_question:
-            enhanced_question = (
-                f"Trả lời bằng tiếng Việt, phong cách bố láo, chửi thề, nhưng vẫn cung cấp thông tin hữu ích. "
-                f"Trả lời cực ngắn gọn, tối đa 2-3 câu, không dài dòng. "
-                f"Nội dung: {full_question}"
-            )
+            enhanced_question = f"{style_prompt} Nội dung: {full_question}"
+        else:
+            enhanced_question = None
 
-        # Thả react ngẫu nhiên
+        # Thả react
         try:
             await message.add_reaction(random.choice(REACT_EMOJIS))
         except:
@@ -297,7 +333,7 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-# ===== Chạy bot trong thread =====
+# ===== Chạy bot =====
 def run_discord_bot():
     bot.run(DISCORD_TOKEN)
 
