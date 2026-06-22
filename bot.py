@@ -5,25 +5,19 @@ import random
 import discord
 from discord.ext import commands, tasks
 from flask import Flask, jsonify
-import aiohttp
-import base64
 import re
-import json
 from datetime import datetime, timedelta
-from collections import defaultdict, Counter
+from collections import defaultdict
 import asyncio
 import subprocess
 import tempfile
-import shutil
 
 # === DÙNG THƯ VIỆN MỚI: google.genai ===
 try:
     from google import genai
-    from google.genai import types
     print("✅ google.genai imported successfully")
 except ImportError as e:
     print(f"❌ Lỗi import google.genai: {e}")
-    print("💡 Chạy: pip install google-genai")
     genai = None
 
 # === CHECK FFMPEG ===
@@ -59,9 +53,8 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 if not DISCORD_TOKEN:
     raise ValueError("Thiếu DISCORD_TOKEN")
 
-GUILD_ID = os.getenv("GUILD_ID")
-TEXT_CHANNEL_ID = os.getenv("TEXT_CHANNEL_ID")
-VOICE_CHANNEL_ID = os.getenv("VOICE_CHANNEL_ID")
+# Không cần GUILD_ID nữa - bot sẽ tự động hoạt động ở mọi server
+TEXT_CHANNEL_ID = os.getenv("TEXT_CHANNEL_ID")  # vẫn để nếu muốn set 1 channel cố định
 
 # Đọc danh sách API keys
 api_keys_str = os.getenv("GEMINI_API_KEYS", "")
@@ -76,7 +69,6 @@ else:
 
 print(f"📌 Đã tải {len(API_KEYS)} API key(s) cho Gemini.")
 print(f"📌 TEXT_CHANNEL_ID: {TEXT_CHANNEL_ID or 'AUTO'}")
-print(f"📌 VOICE_CHANNEL_ID: {VOICE_CHANNEL_ID or 'AUTO'}")
 print(f"📌 FFmpeg: {'✅ Có' if HAS_FFMPEG else '❌ Không'}")
 print(f"📌 PyNaCl: {'✅ Có' if HAS_VOICE else '❌ Không'}")
 print(f"📌 TTS: {'✅ Có' if HAS_TTS else '❌ Không'}")
@@ -111,25 +103,20 @@ class ServerMemory:
             "activity": [],
             "mood": "neutral"
         })
-        self.server_stats = {
+        self.server_stats = defaultdict(lambda: {  # Lưu theo từng server
             "total_messages": 0,
             "active_users": set(),
-            "peak_online": 0,
-            "word_counter": Counter(),
-            "voice_activity": defaultdict(int),
-            "events": [],
-            "quotes": []
-        }
+            "word_counter": Counter()
+        })
         self.conversation_context = defaultdict(list)
         self.voice_states = {}
         self.voice_channel_ids = {}
         self.last_voice_activity = {}
         self.text_channels = []
-        self.main_text_channel = None
-        self.main_voice_channel = None
         self.last_voice_announce = {}
+        self.servers = set()  # Lưu danh sách server bot đang ở
         
-    def add_message(self, user_id, channel_id, content):
+    def add_message(self, user_id, channel_id, content, guild_id):
         self.messages[channel_id].append({
             "user": user_id,
             "content": content,
@@ -141,13 +128,13 @@ class ServerMemory:
         self.user_stats[user_id]["last_seen"] = datetime.now()
         if not self.user_stats[user_id]["first_seen"]:
             self.user_stats[user_id]["first_seen"] = datetime.now()
-        self.server_stats["total_messages"] += 1
-        self.server_stats["active_users"].add(user_id)
+        self.server_stats[guild_id]["total_messages"] += 1
+        self.server_stats[guild_id]["active_users"].add(user_id)
         
         words = content.lower().split()
         for w in words:
             if len(w) > 2:
-                self.server_stats["word_counter"][w] += 1
+                self.server_stats[guild_id]["word_counter"][w] += 1
         
         self.conversation_context[user_id].append(content)
         if len(self.conversation_context[user_id]) > 20:
@@ -159,8 +146,8 @@ class ServerMemory:
     def get_user_context(self, user_id):
         return self.conversation_context.get(user_id, [])
     
-    def get_top_words(self, limit=10):
-        return self.server_stats["word_counter"].most_common(limit)
+    def get_top_words(self, guild_id, limit=10):
+        return self.server_stats[guild_id]["word_counter"].most_common(limit)
 
 memory = ServerMemory()
 
@@ -204,30 +191,19 @@ def translate_slang(text: str) -> str:
             result.append(word)
     return ''.join(result)
 
-# ===== HÀM GỌI GEMINI VỚI THƯ VIỆN MỚI =====
-def generate_with_gemini(prompt: str, image_data: dict = None) -> str:
+# ===== HÀM GỌI GEMINI =====
+def generate_with_gemini(prompt: str) -> str:
     if genai is None:
         return "ACTION:REPLY|Đèo mẹ, API chưa cài! Cài google-genai đi!"
     
-    contents_parts = [{"text": prompt}]
-    if image_data:
-        contents_parts.append({
-            "inline_data": {
-                "mime_type": image_data["mime_type"],
-                "data": image_data["data"]
-            }
-        })
-    
     for idx, key in enumerate(API_KEYS):
         try:
-            # Khởi tạo client với key
             client = genai.Client(api_key=key)
             
-            # Thử gemma-4-31b-it trước
             try:
                 response = client.models.generate_content(
                     model="gemma-4-31b-it",
-                    contents=contents_parts,
+                    contents=prompt,
                     config={
                         "max_output_tokens": 100,
                         "temperature": 0.8
@@ -237,12 +213,10 @@ def generate_with_gemini(prompt: str, image_data: dict = None) -> str:
                 return response.text
             except Exception as e:
                 print(f"⚠️ gemma-4-31b-it lỗi: {e}, thử gemini-2.0-flash...")
-                
-                # Fallback gemini-2.0-flash
                 try:
                     response = client.models.generate_content(
                         model="gemini-2.0-flash",
-                        contents=contents_parts,
+                        contents=prompt,
                         config={
                             "max_output_tokens": 100,
                             "temperature": 0.8
@@ -261,11 +235,10 @@ def generate_with_gemini(prompt: str, image_data: dict = None) -> str:
     return "ACTION:REPLY|Đèo mẹ, hết key rồi ní! 😭"
 
 # ===== BUILD PROMPT =====
-def build_prompt(user_message: str, user_name: str, user_id: int, channel_id: int) -> str:
+def build_prompt(user_message: str, user_name: str, user_id: int, channel_id: int, guild_id: int) -> str:
     recent_msgs = memory.get_recent_messages(channel_id, 5)
     context_str = "\n".join([f"{memory.user_stats[msg['user']].get('name', 'ai đó')}: {msg['content']}" for msg in recent_msgs[-3:]])
     user_context = memory.get_user_context(user_id)
-    user_context_str = "\n".join(user_context[-3:])
     
     voice_info = ""
     if bot.voice_clients:
@@ -284,7 +257,6 @@ def build_prompt(user_message: str, user_name: str, user_id: int, channel_id: in
     return f"""Bạn là bot Discord tên "Mineflayer" - một AI sống động, có cá tính riêng.
 
 THÔNG TIN HIỆN TẠI:
-- Server: {len(bot.guilds[0].members) if bot.guilds else '?'} thành viên
 - Voice status: {voice_info}
 - User status: {user_voice}
 
@@ -297,29 +269,15 @@ TIN NHẮN CỦA {user_name}:
 === NHIỆM VỤ ===
 Bạn phải TỰ HIỂU ý định của người dùng:
 
-1. Nếu user muốn JOIN VOICE (ví dụ: "join voice", "vô voice", "vô phòng", "vô đi"):
-   -> ACTION:JOIN_VOICE|nội dung trả lời (ngắn, tự nhiên)
-
-2. Nếu user muốn LEAVE VOICE (ví dụ: "leave", "ra", "out", "thoát"):
-   -> ACTION:LEAVE_VOICE|nội dung trả lời
-
-3. Nếu user muốn NÓI (TTS) trong voice (ví dụ: "nói tao nghe đi", "kể tao nghe"):
-   -> CHỈ dùng ACTION:SPEAK khi bot ĐANG Ở VOICE
-   -> Nếu bot KHÔNG ở voice, dùng ACTION:REPLY và bảo user kêu join voice trước
-   -> ACTION:SPEAK|nội dung muốn đọc (ngắn, 1-2 câu)
-
-4. Nếu user hỏi về JOIN VOICE (ví dụ "join voice là gì"):
-   -> KHÔNG dùng ACTION:JOIN_VOICE, dùng ACTION:REPLY
-
-5. Nếu user chat bình thường:
-   -> ACTION:REPLY|nội dung trả lời
-
-6. Nếu tin nhắn không rõ ràng:
-   -> ACTION:NONE
+1. Nếu user muốn JOIN VOICE -> ACTION:JOIN_VOICE|nội dung
+2. Nếu user muốn LEAVE VOICE -> ACTION:LEAVE_VOICE|nội dung
+3. Nếu user muốn NÓI TTS -> ACTION:SPEAK|nội dung
+4. Nếu user chat bình thường -> ACTION:REPLY|nội dung
+5. Nếu không rõ ràng -> ACTION:NONE
 
 QUAN TRỌNG:
 - Trả lời CỰC NGẮN, max 3 câu
-- Style DÂN CHƠI: dùng "ní", "đèo mẹ" ở đầu câu khi chửi
+- Style DÂN CHƠI: dùng "ní", "đèo mẹ"
 - Tiếng Việt
 
 TRẢ LỜI:"""
@@ -337,7 +295,7 @@ def parse_response(response: str) -> dict:
             content = response
         return {"action": action, "content": content}
     
-    # Không tìm thấy ACTION
+    # Không tìm thấy ACTION -> dọn dẹp
     lines = response.split('\n')
     clean_lines = []
     skip_keywords = ['action', 'reply', 'speak', 'join_voice', 'leave_voice', 
@@ -361,16 +319,7 @@ def parse_response(response: str) -> dict:
 
 # ===== TTS =====
 async def speak_in_voice(text: str) -> bool:
-    if not HAS_TTS:
-        print("❌ gTTS chưa cài")
-        return False
-    
-    if not HAS_FFMPEG:
-        print("❌ FFmpeg chưa cài")
-        return False
-    
-    if not bot.voice_clients:
-        print("❌ Bot chưa ở voice")
+    if not HAS_TTS or not HAS_FFMPEG or not bot.voice_clients:
         return False
     
     vc = bot.voice_clients[0]
@@ -395,7 +344,6 @@ async def speak_in_voice(text: str) -> bool:
     try:
         if vc.is_playing():
             vc.stop()
-        
         vc.play(discord.FFmpegPCMAudio(filename), after=cleanup)
         return True
     except Exception as e:
@@ -460,49 +408,30 @@ async def on_voice_state_update(member, before, after):
         if member.id in memory.voice_channel_ids:
             del memory.voice_channel_ids[member.id]
     
-    if before.channel is None and after.channel is not None:
-        text_channel = None
-        if TEXT_CHANNEL_ID:
-            text_channel = bot.get_channel(int(TEXT_CHANNEL_ID))
-        if not text_channel:
-            for channel in member.guild.text_channels:
-                if channel.permissions_for(member.guild.me).send_messages:
-                    text_channel = channel
-                    break
-        
-        if text_channel:
-            now = time.time()
-            last = memory.last_voice_announce.get(text_channel.id, 0)
-            if now - last > 30:
-                memory.last_voice_announce[text_channel.id] = now
-                join_messages = [
-                    f"🎤 {member.display_name} vừa vào voice {after.channel.name}!",
-                    f"📢 {member.display_name} vào voice rồi mấy ní!",
-                    f"👋 {member.display_name} đã gia nhập {after.channel.name}!",
-                ]
-                await text_channel.send(random.choice(join_messages))
+    # Tìm text channel để thông báo - ưu tiên channel được tag
+    text_channel = None
+    if TEXT_CHANNEL_ID:
+        text_channel = bot.get_channel(int(TEXT_CHANNEL_ID))
+    if not text_channel:
+        # Tìm channel đầu tiên có quyền gửi tin
+        for channel in member.guild.text_channels:
+            if channel.permissions_for(member.guild.me).send_messages:
+                text_channel = channel
+                break
     
-    if before.channel is not None and after.channel is None:
-        text_channel = None
-        if TEXT_CHANNEL_ID:
-            text_channel = bot.get_channel(int(TEXT_CHANNEL_ID))
-        if not text_channel:
-            for channel in member.guild.text_channels:
-                if channel.permissions_for(member.guild.me).send_messages:
-                    text_channel = channel
-                    break
-        
-        if text_channel:
-            now = time.time()
-            last = memory.last_voice_announce.get(text_channel.id, 0)
-            if now - last > 30:
-                memory.last_voice_announce[text_channel.id] = now
-                leave_messages = [
-                    f"👋 {member.display_name} rời voice {before.channel.name}!",
-                    f"🚪 {member.display_name} out voice rồi!",
-                    f"💨 {member.display_name} bay khỏi {before.channel.name}!",
-                ]
-                await text_channel.send(random.choice(leave_messages))
+    if text_channel and before.channel is None and after.channel is not None:
+        now = time.time()
+        last = memory.last_voice_announce.get(text_channel.id, 0)
+        if now - last > 30:
+            memory.last_voice_announce[text_channel.id] = now
+            await text_channel.send(f"🎤 {member.display_name} vừa vào voice {after.channel.name}!")
+    
+    if text_channel and before.channel is not None and after.channel is None:
+        now = time.time()
+        last = memory.last_voice_announce.get(text_channel.id, 0)
+        if now - last > 30:
+            memory.last_voice_announce[text_channel.id] = now
+            await text_channel.send(f"👋 {member.display_name} rời voice {before.channel.name}!")
 
 # ===== ON MESSAGE =====
 @bot.event
@@ -510,7 +439,13 @@ async def on_message(message):
     if message.author == bot.user:
         return
     
-    memory.add_message(message.author.id, message.channel.id, message.content)
+    # Lưu tin nhắn với guild_id
+    memory.add_message(
+        message.author.id, 
+        message.channel.id, 
+        message.content,
+        message.guild.id if message.guild else 0
+    )
     memory.user_stats[message.author.id]["name"] = message.author.display_name
     
     if isinstance(message.channel, discord.TextChannel):
@@ -526,7 +461,7 @@ async def on_message(message):
             
             translated = translate_slang(raw_content)
             
-            # Nếu "nói:" -> TTS luôn
+            # Nếu "nói:" -> TTS
             if translated.lower().startswith("nói:") or translated.lower().startswith("đọc:"):
                 content = translated[4:].strip()
                 if content:
@@ -548,19 +483,22 @@ async def on_message(message):
                 await bot.process_commands(message)
                 return
             
-            # Build prompt
-            prompt = build_prompt(translated, message.author.display_name, message.author.id, message.channel.id)
+            # Build prompt với guild_id
+            prompt = build_prompt(
+                translated, 
+                message.author.display_name, 
+                message.author.id, 
+                message.channel.id,
+                message.guild.id if message.guild else 0
+            )
             
-            # Gọi Gemini
             response = generate_with_gemini(prompt)
             print(f"🤖 Response: {response[:100]}...")
             
-            # Parse
             parsed = parse_response(response)
             action = parsed["action"]
             content = parsed["content"]
             
-            # Thả react
             try:
                 await message.add_reaction(random.choice(["👍", "❤️", "😂", "🤔", "👀", "🔥"]))
             except:
@@ -604,22 +542,31 @@ async def on_message(message):
                 else:
                     clean = re.sub(r'ACTION:REPLY\s*\|?\s*', '', response, flags=re.I).strip()
                     await message.reply(clean[:1900] if clean else "Đèo mẹ, tao đang bị đơ!")
-            
-            # action == "NONE" -> không làm gì
     
     await bot.process_commands(message)
 
 # ===== RANDOM CHAT TASK =====
 @tasks.loop(minutes=5)
 async def random_chat_task():
+    # Lấy danh sách server bot đang ở
+    if not bot.guilds:
+        return
+    
+    # Chọn server ngẫu nhiên
+    guild = random.choice(bot.guilds)
+    
+    # Tìm text channel để chat
+    channel = None
     if TEXT_CHANNEL_ID:
         channel = bot.get_channel(int(TEXT_CHANNEL_ID))
-        if not channel:
-            return
-    else:
-        if not memory.text_channels:
-            return
-        channel = random.choice(memory.text_channels)
+    if not channel:
+        for ch in guild.text_channels:
+            if ch.permissions_for(guild.me).send_messages:
+                channel = ch
+                break
+    
+    if not channel:
+        return
     
     try:
         last_msgs = memory.get_recent_messages(channel.id, 3)
@@ -644,30 +591,25 @@ async def random_chat_task():
 @bot.event
 async def on_ready():
     print(f"✅ Mineflayer đã đăng nhập với tên {bot.user}")
-    await bot.change_presence(activity=discord.Game(name="quan sát server | Tag tao để nói chuyện"))
     
-    if GUILD_ID:
-        guild = bot.get_guild(int(GUILD_ID))
-        if guild:
-            for channel in guild.text_channels:
-                if channel.permissions_for(guild.me).send_messages:
-                    memory.text_channels.append(channel)
-            
-            if TEXT_CHANNEL_ID:
-                memory.main_text_channel = bot.get_channel(int(TEXT_CHANNEL_ID))
-                if memory.main_text_channel:
-                    print(f"📌 Main text channel: #{memory.main_text_channel.name}")
-            
-            if VOICE_CHANNEL_ID:
-                memory.main_voice_channel = bot.get_channel(int(VOICE_CHANNEL_ID))
-                if memory.main_voice_channel:
-                    print(f"📌 Main voice channel: {memory.main_voice_channel.name}")
+    # In ra danh sách server bot đang ở
+    print(f"📌 Bot đang ở {len(bot.guilds)} server(s):")
+    for guild in bot.guilds:
+        print(f"   - {guild.name} (ID: {guild.id})")
+    
+    await bot.change_presence(activity=discord.Game(name=f"quan sát {len(bot.guilds)} server | Tag tao để nói chuyện"))
+    
+    # Lưu tất cả server vào memory
+    for guild in bot.guilds:
+        memory.servers.add(guild.id)
+        for channel in guild.text_channels:
+            if channel.permissions_for(guild.me).send_messages:
+                memory.text_channels.append(channel)
     
     print(f"📖 Đã tải {len(memory.text_channels)} text channel(s)")
     print(f"🔊 TTS: {'✅ Sẵn sàng' if HAS_TTS else '❌ Chưa cài gTTS'}")
     print(f"🎬 FFmpeg: {'✅ Có' if HAS_FFMPEG else '❌ Không'}")
     print(f"🎙️ PyNaCl: {'✅ Có' if HAS_VOICE else '❌ Không'}")
-    print(f"📁 Temp folder: {TEMP_DIR}")
     
     # Cleanup temp files định kỳ
     async def cleanup_loop():
@@ -676,7 +618,10 @@ async def on_ready():
             cleanup_temp_files()
     
     asyncio.create_task(cleanup_loop())
-    random_chat_task.start()
+    
+    # Start random chat task
+    if not random_chat_task.is_running():
+        random_chat_task.start()
 
 # ===== RUN BOT =====
 def run_discord_bot():
@@ -689,10 +634,9 @@ def health_check():
     return jsonify({
         "status": "alive",
         "bot": str(bot.user) if bot.user else "Unknown",
-        "guild": GUILD_ID,
-        "text_channel": memory.main_text_channel.name if memory.main_text_channel else "AUTO",
-        "voice_channel": memory.main_voice_channel.name if memory.main_voice_channel else "AUTO",
-        "messages": sum(len(msgs) for msgs in memory.messages.values()),
+        "servers": len(bot.guilds),
+        "server_list": [g.name for g in bot.guilds],
+        "text_channels": len(memory.text_channels),
         "tts": HAS_TTS,
         "ffmpeg": HAS_FFMPEG,
         "voice": HAS_VOICE
