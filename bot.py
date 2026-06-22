@@ -7,7 +7,7 @@ from discord.ext import commands, tasks
 from flask import Flask, jsonify
 import re
 from datetime import datetime, timedelta
-from collections import defaultdict
+from collections import defaultdict, Counter
 import asyncio
 import subprocess
 import tempfile
