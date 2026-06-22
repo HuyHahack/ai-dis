@@ -26,6 +26,10 @@ GUILD_ID = os.getenv("GUILD_ID")
 if not GUILD_ID:
     print("⚠️ Không có GUILD_ID")
 
+# ==== CHANNEL IDS (set trên Render) ====
+TEXT_CHANNEL_ID = os.getenv("TEXT_CHANNEL_ID")  # Channel để bot chat
+VOICE_CHANNEL_ID = os.getenv("VOICE_CHANNEL_ID")  # Voice mặc định
+
 # Đọc danh sách API keys
 api_keys_str = os.getenv("GEMINI_API_KEYS", "")
 if api_keys_str:
@@ -38,6 +42,8 @@ if not API_KEYS:
     raise ValueError("Không có API key nào được cấu hình")
 
 print(f"📌 Đã tải {len(API_KEYS)} API key(s) cho Gemini.")
+print(f"📌 TEXT_CHANNEL_ID: {TEXT_CHANNEL_ID or 'AUTO'}")
+print(f"📌 VOICE_CHANNEL_ID: {VOICE_CHANNEL_ID or 'AUTO'}")
 
 # ===== Discord bot =====
 intents = discord.Intents.all()
@@ -70,6 +76,8 @@ class ServerMemory:
         self.voice_states = {}
         self.last_voice_activity = {}
         self.text_channels = []
+        self.main_text_channel = None
+        self.main_voice_channel = None
         
     def add_message(self, user_id, channel_id, content):
         self.messages[channel_id].append({
@@ -261,11 +269,8 @@ TRẢ LỜI (cực ngắn, max 3 câu, tiếng Việt, style dân chơi):"""
         response = generate_with_gemini(prompt)
         response = re.sub(r'TRẢ LỜI:\s*', '', response)
         response = re.sub(r'^\s*\n', '', response)
-        # Đảm bảo style dân chơi
         response = response.replace("fen", "ní")
         response = response.replace("bạn", "ní")
-        response = response.replace("mày", "mày")
-        # Sửa các trường hợp "đèo mẹ" ở cuối câu
         response = re.sub(r'([.,!?])\s*đèo mẹ', r'\1', response, flags=re.IGNORECASE)
         response = re.sub(r'([.,!?])\s*đéo má', r'\1', response, flags=re.IGNORECASE)
         return response
@@ -334,11 +339,15 @@ async def on_voice_state_update(member, before, after):
         memory.last_voice_activity[after.channel.id] = datetime.now()
     
     if before.channel is None and after.channel is not None:
+        # Tìm text channel để chào (ưu tiên TEXT_CHANNEL_ID)
         text_channel = None
-        for channel in member.guild.text_channels:
-            if channel.permissions_for(member.guild.me).send_messages:
-                text_channel = channel
-                break
+        if TEXT_CHANNEL_ID:
+            text_channel = bot.get_channel(int(TEXT_CHANNEL_ID))
+        if not text_channel:
+            for channel in member.guild.text_channels:
+                if channel.permissions_for(member.guild.me).send_messages:
+                    text_channel = channel
+                    break
         
         if text_channel:
             join_messages = [
@@ -351,10 +360,13 @@ async def on_voice_state_update(member, before, after):
     
     if before.channel is not None and after.channel is None:
         text_channel = None
-        for channel in member.guild.text_channels:
-            if channel.permissions_for(member.guild.me).send_messages:
-                text_channel = channel
-                break
+        if TEXT_CHANNEL_ID:
+            text_channel = bot.get_channel(int(TEXT_CHANNEL_ID))
+        if not text_channel:
+            for channel in member.guild.text_channels:
+                if channel.permissions_for(member.guild.me).send_messages:
+                    text_channel = channel
+                    break
         
         if text_channel:
             leave_messages = [
@@ -417,10 +429,17 @@ async def on_message(message):
 # ===== Random chat task =====
 @tasks.loop(minutes=5)
 async def random_chat_task():
-    if not memory.text_channels:
-        return
+    # Ưu tiên dùng TEXT_CHANNEL_ID
+    if TEXT_CHANNEL_ID:
+        channel = bot.get_channel(int(TEXT_CHANNEL_ID))
+        if not channel:
+            print(f"⚠️ Không tìm thấy text channel {TEXT_CHANNEL_ID}")
+            return
+    else:
+        if not memory.text_channels:
+            return
+        channel = random.choice(memory.text_channels)
     
-    channel = random.choice(memory.text_channels)
     try:
         last_msgs = memory.get_recent_messages(channel.id, 3)
         if last_msgs:
@@ -448,10 +467,13 @@ async def random_chat_task():
 async def on_member_join(member):
     memory.user_stats[member.id]["first_seen"] = datetime.now()
     text_channel = None
-    for channel in member.guild.text_channels:
-        if channel.permissions_for(member.guild.me).send_messages:
-            text_channel = channel
-            break
+    if TEXT_CHANNEL_ID:
+        text_channel = bot.get_channel(int(TEXT_CHANNEL_ID))
+    if not text_channel:
+        for channel in member.guild.text_channels:
+            if channel.permissions_for(member.guild.me).send_messages:
+                text_channel = channel
+                break
     
     if text_channel:
         welcome_messages = [
@@ -465,7 +487,11 @@ async def on_member_join(member):
 @bot.event
 async def on_member_remove(member):
     memory.user_stats[member.id]["last_seen"] = datetime.now()
-    text_channel = member.guild.system_channel
+    text_channel = None
+    if TEXT_CHANNEL_ID:
+        text_channel = bot.get_channel(int(TEXT_CHANNEL_ID))
+    if not text_channel:
+        text_channel = member.guild.system_channel
     
     if text_channel:
         leave_messages = [
@@ -485,9 +511,22 @@ async def on_ready():
     if GUILD_ID:
         guild = bot.get_guild(int(GUILD_ID))
         if guild:
+            # Lưu text channels
             for channel in guild.text_channels:
                 if channel.permissions_for(guild.me).send_messages:
                     memory.text_channels.append(channel)
+            
+            # Set main text channel
+            if TEXT_CHANNEL_ID:
+                memory.main_text_channel = bot.get_channel(int(TEXT_CHANNEL_ID))
+                if memory.main_text_channel:
+                    print(f"📌 Main text channel: #{memory.main_text_channel.name}")
+            
+            # Set main voice channel
+            if VOICE_CHANNEL_ID:
+                memory.main_voice_channel = bot.get_channel(int(VOICE_CHANNEL_ID))
+                if memory.main_voice_channel:
+                    print(f"📌 Main voice channel: {memory.main_voice_channel.name}")
     
     print(f"📖 Đã tải {len(memory.text_channels)} text channel(s)")
     random_chat_task.start()
@@ -504,7 +543,8 @@ def health_check():
         "status": "alive",
         "bot": "Mineflayer",
         "guild": GUILD_ID,
-        "text_channels": len(memory.text_channels),
+        "text_channel": memory.main_text_channel.name if memory.main_text_channel else "AUTO",
+        "voice_channel": memory.main_voice_channel.name if memory.main_voice_channel else "AUTO",
         "messages": sum(len(msgs) for msgs in memory.messages.values())
     })
 
