@@ -16,6 +16,16 @@ import subprocess
 import tempfile
 import shutil
 
+# === DÙNG THƯ VIỆN MỚI: google.genai ===
+try:
+    from google import genai
+    from google.genai import types
+    print("✅ google.genai imported successfully")
+except ImportError as e:
+    print(f"❌ Lỗi import google.genai: {e}")
+    print("💡 Chạy: pip install google-genai")
+    genai = None
+
 # === CHECK FFMPEG ===
 def check_ffmpeg():
     try:
@@ -40,14 +50,6 @@ try:
 except ImportError:
     HAS_TTS = False
     print("⚠️ gTTS chưa cài, TTS sẽ không hoạt động")
-
-# === GENAI ===
-try:
-    import google.generativeai as genai
-    print("✅ google.generativeai imported")
-except ImportError as e:
-    print(f"❌ Lỗi import genai: {e}")
-    genai = None
 
 # ===== FLASK APP =====
 app = Flask(__name__)
@@ -202,10 +204,10 @@ def translate_slang(text: str) -> str:
             result.append(word)
     return ''.join(result)
 
-# ===== HÀM GỌI GEMINI =====
+# ===== HÀM GỌI GEMINI VỚI THƯ VIỆN MỚI =====
 def generate_with_gemini(prompt: str, image_data: dict = None) -> str:
     if genai is None:
-        return "ACTION:REPLY|Đèo mẹ, API chưa cài! Cài google-generativeai đi!"
+        return "ACTION:REPLY|Đèo mẹ, API chưa cài! Cài google-genai đi!"
     
     contents_parts = [{"text": prompt}]
     if image_data:
@@ -218,14 +220,15 @@ def generate_with_gemini(prompt: str, image_data: dict = None) -> str:
     
     for idx, key in enumerate(API_KEYS):
         try:
-            genai.configure(api_key=key)
+            # Khởi tạo client với key
+            client = genai.Client(api_key=key)
             
             # Thử gemma-4-31b-it trước
             try:
-                model = genai.GenerativeModel("gemma-4-31b-it")
-                response = model.generate_content(
-                    prompt,
-                    generation_config={
+                response = client.models.generate_content(
+                    model="gemma-4-31b-it",
+                    contents=contents_parts,
+                    config={
                         "max_output_tokens": 100,
                         "temperature": 0.8
                     }
@@ -237,10 +240,10 @@ def generate_with_gemini(prompt: str, image_data: dict = None) -> str:
                 
                 # Fallback gemini-2.0-flash
                 try:
-                    model = genai.GenerativeModel("gemini-2.0-flash")
-                    response = model.generate_content(
-                        prompt,
-                        generation_config={
+                    response = client.models.generate_content(
+                        model="gemini-2.0-flash",
+                        contents=contents_parts,
+                        config={
                             "max_output_tokens": 100,
                             "temperature": 0.8
                         }
