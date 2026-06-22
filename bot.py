@@ -54,7 +54,7 @@ api_keys_str = os.getenv("GEMINI_API_KEYS", "")
 if api_keys_str:
     API_KEYS = [k.strip() for k in api_keys_str.split(",") if k.strip()]
 else:
-    default_key = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6KXHMxGFhINizxK_9lCTnCyQx-18nL6KbF7mIUs2Jtv-g")
+    default_key = os.getenv("GEMINI_API_KEY")
     API_KEYS = [default_key]
 
 if not API_KEYS:
@@ -229,7 +229,7 @@ def generate_with_gemini(prompt: str, image_data: dict = None) -> str:
     for idx, key in enumerate(API_KEYS):
         try:
             genai.configure(api_key=key)
-            model = genai.GenerativeModel("gemini-2.0-flash")
+            model = genai.GenerativeModel("gemma-4-31b-it")
             response = model.generate_content(prompt)
             return response.text
         except Exception as e:
