@@ -11,13 +11,22 @@ from collections import defaultdict, Counter
 import asyncio
 import subprocess
 import tempfile
+import logging
+
+# ===== LOGGING CHI TIẾT =====
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # === DÙNG THƯ VIỆN MỚI: google.genai ===
 try:
     from google import genai
-    print("✅ google.genai imported successfully")
+    logger.info("✅ google.genai imported successfully")
 except ImportError as e:
-    print(f"❌ Lỗi import google.genai: {e}")
+    logger.error(f"❌ Lỗi import google.genai: {e}")
     genai = None
 
 # === CHECK FFMPEG ===
@@ -28,6 +37,7 @@ def check_ffmpeg():
     except:
         return False
 HAS_FFMPEG = check_ffmpeg()
+logger.info(f"📌 FFmpeg: {'✅ Có' if HAS_FFMPEG else '❌ Không'}")
 
 # === CHECK VOICE ===
 try:
@@ -35,7 +45,8 @@ try:
     HAS_VOICE = True
 except ImportError:
     HAS_VOICE = False
-    print("⚠️ PyNaCl chưa cài, voice sẽ không hoạt động")
+    logger.warning("⚠️ PyNaCl chưa cài, voice sẽ không hoạt động")
+logger.info(f"📌 PyNaCl: {'✅ Có' if HAS_VOICE else '❌ Không'}")
 
 # === TTS ===
 try:
@@ -43,7 +54,8 @@ try:
     HAS_TTS = True
 except ImportError:
     HAS_TTS = False
-    print("⚠️ gTTS chưa cài, TTS sẽ không hoạt động")
+    logger.warning("⚠️ gTTS chưa cài, TTS sẽ không hoạt động")
+logger.info(f"📌 TTS: {'✅ Có' if HAS_TTS else '❌ Không'}")
 
 # ===== FLASK APP =====
 app = Flask(__name__)
@@ -55,7 +67,6 @@ if not DISCORD_TOKEN:
 
 TEXT_CHANNEL_ID = os.getenv("TEXT_CHANNEL_ID")
 
-# Đọc danh sách API keys
 api_keys_str = os.getenv("GEMINI_API_KEYS", "")
 if api_keys_str:
     API_KEYS = [k.strip() for k in api_keys_str.split(",") if k.strip()]
@@ -66,11 +77,8 @@ else:
     else:
         API_KEYS = ["YOUR_API_KEY_HERE"]
 
-print(f"📌 Đã tải {len(API_KEYS)} API key(s) cho Gemini.")
-print(f"📌 TEXT_CHANNEL_ID: {TEXT_CHANNEL_ID or 'AUTO'}")
-print(f"📌 FFmpeg: {'✅ Có' if HAS_FFMPEG else '❌ Không'}")
-print(f"📌 PyNaCl: {'✅ Có' if HAS_VOICE else '❌ Không'}")
-print(f"📌 TTS: {'✅ Có' if HAS_TTS else '❌ Không'}")
+logger.info(f"📌 Đã tải {len(API_KEYS)} API key(s) cho Gemini.")
+logger.info(f"📌 TEXT_CHANNEL_ID: {TEXT_CHANNEL_ID or 'AUTO'}")
 
 # ===== DISCORD BOT =====
 intents = discord.Intents.all()
@@ -78,7 +86,7 @@ bot = commands.Bot(command_prefix="", intents=intents)
 
 # ===== TEMP FOLDER =====
 TEMP_DIR = tempfile.mkdtemp(prefix="mineflayer_tts_")
-print(f"📁 Temp folder: {TEMP_DIR}")
+logger.info(f"📁 Temp folder: {TEMP_DIR}")
 
 def cleanup_temp_files():
     try:
@@ -190,16 +198,21 @@ def translate_slang(text: str) -> str:
             result.append(word)
     return ''.join(result)
 
-# ===== HÀM GỌI GEMINI - FIX NULL =====
+# ===== HÀM GỌI GEMINI =====
 def generate_with_gemini(prompt: str) -> str:
+    logger.info("🔄 Gọi Gemini API...")
+    
     if genai is None:
+        logger.error("❌ genai chưa được import")
         return "ACTION:REPLY|Đèo mẹ, API chưa cài! Cài google-genai đi!"
     
     for idx, key in enumerate(API_KEYS):
         try:
+            logger.info(f"🔄 Thử key {idx+1}/{len(API_KEYS)}...")
             client = genai.Client(api_key=key)
             
             try:
+                logger.info("🔄 Gọi gemma-4-31b-it...")
                 response = client.models.generate_content(
                     model="gemma-4-31b-it",
                     contents=prompt,
@@ -208,16 +221,17 @@ def generate_with_gemini(prompt: str) -> str:
                         "temperature": 0.8
                     }
                 )
-                # FIX: Kiểm tra response có text không
                 if response and hasattr(response, 'text') and response.text:
-                    print(f"✅ gemma-4-31b-it thành công với key {idx+1}")
+                    logger.info(f"✅ gemma-4-31b-it thành công với key {idx+1}")
+                    logger.info(f"📝 Response: {response.text[:100]}...")
                     return response.text
                 else:
-                    print(f"⚠️ gemma-4-31b-it trả về rỗng với key {idx+1}")
+                    logger.warning(f"⚠️ gemma-4-31b-it trả về rỗng với key {idx+1}")
                     
             except Exception as e:
-                print(f"⚠️ gemma-4-31b-it lỗi: {e}, thử gemini-2.0-flash...")
+                logger.warning(f"⚠️ gemma-4-31b-it lỗi: {e}, thử gemini-2.0-flash...")
                 try:
+                    logger.info("🔄 Gọi gemini-2.0-flash...")
                     response = client.models.generate_content(
                         model="gemini-2.0-flash",
                         contents=prompt,
@@ -227,18 +241,20 @@ def generate_with_gemini(prompt: str) -> str:
                         }
                     )
                     if response and hasattr(response, 'text') and response.text:
-                        print(f"✅ gemini-2.0-flash thành công với key {idx+1}")
+                        logger.info(f"✅ gemini-2.0-flash thành công với key {idx+1}")
+                        logger.info(f"📝 Response: {response.text[:100]}...")
                         return response.text
                     else:
-                        print(f"⚠️ gemini-2.0-flash trả về rỗng với key {idx+1}")
+                        logger.warning(f"⚠️ gemini-2.0-flash trả về rỗng với key {idx+1}")
                 except Exception as e2:
-                    print(f"⚠️ gemini-2.0-flash lỗi: {e2}")
+                    logger.warning(f"⚠️ gemini-2.0-flash lỗi: {e2}")
                     continue
                     
         except Exception as e:
-            print(f"❌ Key {idx+1} lỗi: {e}")
+            logger.error(f"❌ Key {idx+1} lỗi: {e}")
             continue
     
+    logger.error("❌ Tất cả key đều thất bại!")
     return "ACTION:REPLY|Đèo mẹ, hết key rồi ní! 😭"
 
 # ===== BUILD PROMPT =====
@@ -291,6 +307,7 @@ TRẢ LỜI:"""
 # ===== PARSE RESPONSE =====
 def parse_response(response: str) -> dict:
     if not response:
+        logger.warning("⚠️ Response rỗng, dùng fallback")
         return {"action": "REPLY", "content": "Đèo mẹ, tao bị đơ!"}
     
     action_match = re.search(r"ACTION\s*:\s*(\w+)", response, re.I)
@@ -302,9 +319,11 @@ def parse_response(response: str) -> dict:
             content = re.sub(r"ACTION\s*:\s*\w+", "", response, flags=re.I).strip()
         if not content:
             content = response
+        logger.info(f"🎯 Action: {action}, Content: {content[:50]}...")
         return {"action": action, "content": content}
     
     # Không tìm thấy ACTION -> dọn dẹp
+    logger.warning("⚠️ Không tìm thấy ACTION, dọn dẹp response...")
     lines = response.split('\n')
     clean_lines = []
     skip_keywords = ['action', 'reply', 'speak', 'join_voice', 'leave_voice', 
@@ -328,35 +347,50 @@ def parse_response(response: str) -> dict:
 
 # ===== TTS =====
 async def speak_in_voice(text: str) -> bool:
-    if not HAS_TTS or not HAS_FFMPEG or not bot.voice_clients:
+    if not HAS_TTS:
+        logger.error("❌ gTTS chưa cài")
+        return False
+    
+    if not HAS_FFMPEG:
+        logger.error("❌ FFmpeg chưa cài")
+        return False
+    
+    if not bot.voice_clients:
+        logger.warning("⚠️ Bot chưa ở voice")
         return False
     
     vc = bot.voice_clients[0]
     if not vc.is_connected():
+        logger.warning("⚠️ Voice không kết nối")
         return False
     
     filename = os.path.join(TEMP_DIR, f"tts_{random.randint(1000, 9999)}.mp3")
+    logger.info(f"🔊 Tạo TTS: {text}")
     
     try:
         await asyncio.to_thread(lambda: gTTS(text=text, lang="vi", slow=False).save(filename))
+        logger.info(f"✅ TTS đã lưu: {filename}")
     except Exception as e:
-        print(f"TTS tạo file lỗi: {e}")
+        logger.error(f"❌ TTS tạo file lỗi: {e}")
         return False
     
     def cleanup(error):
         try:
             if os.path.exists(filename):
                 os.remove(filename)
+                logger.info(f"🗑️ Đã xóa file: {filename}")
         except:
             pass
     
     try:
         if vc.is_playing():
             vc.stop()
+            logger.info("⏹️ Đã dừng phát trước đó")
         vc.play(discord.FFmpegPCMAudio(filename), after=cleanup)
+        logger.info("▶️ Đang phát TTS...")
         return True
     except Exception as e:
-        print(f"TTS phát lỗi: {e}")
+        logger.error(f"❌ TTS phát lỗi: {e}")
         cleanup(None)
         return False
 
@@ -364,25 +398,33 @@ async def speak_in_voice(text: str) -> bool:
 async def handle_voice_action(message, action):
     if action == "join_voice":
         if not message.author.voice:
+            logger.warning(f"⚠️ {message.author.display_name} không ở voice")
             await message.reply("Đèo mẹ, mày ở trong voice mới gọi tao được chứ!")
             return False
         
         channel = message.author.voice.channel
+        logger.info(f"🎙️ {message.author.display_name} yêu cầu join voice {channel.name}")
         
         if bot.voice_clients:
             vc = bot.voice_clients[0]
             if vc.channel and vc.channel.id == channel.id:
+                logger.info(f"ℹ️ Đã ở voice {channel.name} rồi")
                 await message.reply(f"Đèo mẹ, tao đang ở {channel.name} rồi mà ní 😭")
                 return True
+            logger.info(f"🔄 Di chuyển từ {vc.channel.name} sang {channel.name}")
             await vc.move_to(channel)
         else:
             try:
                 if HAS_VOICE:
+                    logger.info(f"🔗 Đang kết nối voice {channel.name}...")
                     await channel.connect()
+                    logger.info(f"✅ Đã kết nối voice {channel.name}")
                 else:
+                    logger.error("❌ PyNaCl chưa cài")
                     await message.reply("Đèo mẹ, tao chưa cài voice!")
                     return False
             except Exception as e:
+                logger.error(f"❌ Lỗi voice: {e}")
                 await message.reply(f"Lỗi voice: {e}")
                 return False
         
@@ -390,14 +432,18 @@ async def handle_voice_action(message, action):
             voice_chat = bot.get_channel(channel.id)
             if isinstance(voice_chat, discord.VoiceChannel):
                 await voice_chat.send(f"Chào mấy ní! {message.author.display_name} rủ t vô đây.")
+                logger.info(f"📢 Đã gửi tin chào trong voice")
         except:
             pass
         return True
     
     elif action == "leave_voice":
         if bot.voice_clients:
+            logger.info("🔇 Đang rời voice...")
             await bot.voice_clients[0].disconnect()
+            logger.info("✅ Đã rời voice")
         else:
+            logger.warning("⚠️ Bot không ở voice nào")
             await message.reply("Đéo má, tao ở voice nào cả!")
         return True
 
@@ -411,11 +457,13 @@ async def on_voice_state_update(member, before, after):
         memory.voice_states[member.id] = after.channel.name
         memory.voice_channel_ids[member.id] = after.channel.id
         memory.last_voice_activity[after.channel.id] = datetime.now()
+        logger.info(f"🎤 {member.display_name} vào voice {after.channel.name}")
     else:
         if member.id in memory.voice_states:
             del memory.voice_states[member.id]
         if member.id in memory.voice_channel_ids:
             del memory.voice_channel_ids[member.id]
+        logger.info(f"🚪 {member.display_name} rời voice")
     
     text_channel = None
     if TEXT_CHANNEL_ID:
@@ -440,11 +488,13 @@ async def on_voice_state_update(member, before, after):
             memory.last_voice_announce[text_channel.id] = now
             await text_channel.send(f"👋 {member.display_name} rời voice {before.channel.name}!")
 
-# ===== ON MESSAGE - FIX NULL =====
+# ===== ON MESSAGE =====
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
         return
+    
+    logger.info(f"💬 Tin nhắn từ {message.author.display_name}: {message.content[:50]}...")
     
     memory.add_message(
         message.author.id, 
@@ -457,8 +507,11 @@ async def on_message(message):
     if isinstance(message.channel, discord.TextChannel):
         if message.channel not in memory.text_channels:
             memory.text_channels.append(message.channel)
+            logger.info(f"📢 Đã thêm channel: {message.channel.name}")
         
         if bot.user in message.mentions:
+            logger.info(f"🏷️ Bot bị tag bởi {message.author.display_name}")
+            
             raw_content = message.clean_content.replace(f"@{bot.user.display_name}", "").strip()
             if not raw_content:
                 await message.reply(random.choice(["Hả?", "Gì?", "Ờ?", "Sao?"]))
@@ -466,10 +519,12 @@ async def on_message(message):
                 return
             
             translated = translate_slang(raw_content)
+            logger.info(f"📝 Nội dung sau khi dịch slang: {translated}")
             
             if translated.lower().startswith("nói:") or translated.lower().startswith("đọc:"):
                 content = translated[4:].strip()
                 if content:
+                    logger.info(f"🔊 Yêu cầu TTS: {content}")
                     if not bot.voice_clients:
                         if message.author.voice:
                             await message.reply("Đèo mẹ, tao tự join voice cho mày đây!")
@@ -495,37 +550,43 @@ async def on_message(message):
                 message.channel.id,
                 message.guild.id if message.guild else 0
             )
+            logger.info(f"📋 Prompt gửi Gemini: {prompt[:100]}...")
             
             response = generate_with_gemini(prompt)
             
-            # FIX: Kiểm tra response null
             if response is None:
+                logger.error("❌ Response từ Gemini là None!")
                 await message.reply("Đèo mẹ, API đang bị lỗi! Thử lại sau!")
                 await bot.process_commands(message)
                 return
             
-            print(f"🤖 Response: {response[:100]}...")
+            logger.info(f"📥 Response từ Gemini: {response[:100]}...")
             
             parsed = parse_response(response)
             action = parsed["action"]
             content = parsed["content"]
+            logger.info(f"🎯 Action: {action}")
             
             try:
                 await message.add_reaction(random.choice(["👍", "❤️", "😂", "🤔", "👀", "🔥"]))
-            except:
-                pass
+                logger.info("✅ Đã thả react")
+            except Exception as e:
+                logger.warning(f"⚠️ Lỗi thả react: {e}")
             
             if action == "JOIN_VOICE":
+                logger.info("🎯 Xử lý JOIN_VOICE")
                 await handle_voice_action(message, "join_voice")
                 if content and content != response:
                     await message.reply(content)
             
             elif action == "LEAVE_VOICE":
+                logger.info("🎯 Xử lý LEAVE_VOICE")
                 await handle_voice_action(message, "leave_voice")
                 if content and content != response:
                     await message.reply(content)
             
             elif action == "SPEAK":
+                logger.info(f"🎯 Xử lý SPEAK: {content}")
                 if not bot.voice_clients:
                     if message.author.voice:
                         await message.reply("Đèo mẹ, tao tự join voice cho mày đây!")
@@ -543,6 +604,7 @@ async def on_message(message):
                     await message.reply("Đèo mẹ, TTS lỗi!")
             
             elif action == "REPLY":
+                logger.info(f"🎯 Xử lý REPLY: {content[:50]}...")
                 if content and content != response:
                     if len(content) > 2000:
                         for part in [content[i:i+1997] for i in range(0, len(content), 1997)]:
@@ -562,6 +624,7 @@ async def random_chat_task():
         return
     
     guild = random.choice(bot.guilds)
+    logger.info(f"🔄 Random chat task: chọn server {guild.name}")
     
     channel = None
     if TEXT_CHANNEL_ID:
@@ -573,6 +636,7 @@ async def random_chat_task():
                 break
     
     if not channel:
+        logger.warning("⚠️ Không tìm thấy channel để random chat")
         return
     
     try:
@@ -590,18 +654,19 @@ async def random_chat_task():
                         "Mấy ní đi đâu hết rồi?",
                         "Sao vắng thế này?"
                     ]
-                    await channel.send(random.choice(messages))
+                    msg = random.choice(messages)
+                    await channel.send(msg)
+                    logger.info(f"📢 Random chat: {msg}")
     except Exception as e:
-        print(f"Lỗi random chat: {e}")
+        logger.error(f"❌ Lỗi random chat: {e}")
 
 # ===== ON READY =====
 @bot.event
 async def on_ready():
-    print(f"✅ Mineflayer đã đăng nhập với tên {bot.user}")
-    
-    print(f"📌 Bot đang ở {len(bot.guilds)} server(s):")
+    logger.info(f"✅ Mineflayer đã đăng nhập với tên {bot.user}")
+    logger.info(f"📌 Bot đang ở {len(bot.guilds)} server(s):")
     for guild in bot.guilds:
-        print(f"   - {guild.name} (ID: {guild.id})")
+        logger.info(f"   - {guild.name} (ID: {guild.id})")
     
     await bot.change_presence(activity=discord.Game(name=f"quan sát {len(bot.guilds)} server | Tag tao để nói chuyện"))
     
@@ -611,23 +676,23 @@ async def on_ready():
             if channel.permissions_for(guild.me).send_messages:
                 memory.text_channels.append(channel)
     
-    print(f"📖 Đã tải {len(memory.text_channels)} text channel(s)")
-    print(f"🔊 TTS: {'✅ Sẵn sàng' if HAS_TTS else '❌ Chưa cài gTTS'}")
-    print(f"🎬 FFmpeg: {'✅ Có' if HAS_FFMPEG else '❌ Không'}")
-    print(f"🎙️ PyNaCl: {'✅ Có' if HAS_VOICE else '❌ Không'}")
+    logger.info(f"📖 Đã tải {len(memory.text_channels)} text channel(s)")
     
     async def cleanup_loop():
         while True:
             await asyncio.sleep(3600)
             cleanup_temp_files()
+            logger.info("🗑️ Đã dọn dẹp temp files")
     
     asyncio.create_task(cleanup_loop())
     
     if not random_chat_task.is_running():
         random_chat_task.start()
+        logger.info("✅ Đã start random chat task")
 
 # ===== RUN BOT =====
 def run_discord_bot():
+    logger.info("🚀 Đang chạy bot...")
     bot.run(DISCORD_TOKEN)
 
 # ===== FLASK HEALTH CHECK =====
@@ -650,4 +715,5 @@ if __name__ == "__main__":
     bot_thread = threading.Thread(target=run_discord_bot, daemon=True)
     bot_thread.start()
     port = int(os.getenv("PORT", 10000))
+    logger.info(f"🌐 Flask đang chạy trên port {port}")
     app.run(host="0.0.0.0", port=port)
